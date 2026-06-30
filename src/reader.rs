@@ -27,7 +27,7 @@ pub(crate) enum ReadError {
 }
 
 impl core::fmt::Display for ReadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ReadError::Errno(errno) => write!(f, "{errno}"),
             ReadError::GotNonUtf8 => write!(f, "GotNonUtf8"),
@@ -63,7 +63,7 @@ impl Reader {
     }
 
     fn as_string(&self) -> Result<ReadResult, ReadError> {
-        match std::str::from_utf8(&self.buf[..self.len]) {
+        match core::str::from_utf8(&self.buf[..self.len]) {
             Ok(s) => Ok(ReadResult::Done(s.to_string())),
             Err(err) if self.len == self.buf.len() => {
                 let valid = err.valid_up_to();

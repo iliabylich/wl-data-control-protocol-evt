@@ -410,7 +410,10 @@ fn main() -> Result<()> {
     let display = conn.display();
     display.get_registry(&queue.handle(), ());
     queue.roundtrip(&mut state)?;
-    if state.ext_data_control_manager.is_none() {
+    if state.wl_seat.is_none() {
+        bail!("failed to get wl_seat");
+    }
+    if state.ext_data_control_manager.is_none() || state.ext_data_control_device.is_none() {
         bail!("Wayland protocol 'ext_data_control_v1' is not supported by your compositor");
     }
 
@@ -435,7 +438,7 @@ fn main() -> Result<()> {
             .prepare_read()
             .context("failed to create ReadEventsGuard")?;
 
-        let mut pollfds = std::iter::empty()
+        let mut pollfds = core::iter::empty()
             .chain(state.readers.values().map(Reader::as_pollfd))
             .chain(state.writers.values().map(Writer::as_pollfd))
             .chain([PollFd::new(&wl_fd, PollFlags::IN)])

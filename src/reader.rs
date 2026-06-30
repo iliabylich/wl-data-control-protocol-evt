@@ -50,13 +50,9 @@ impl Reader {
     pub(crate) fn read(&mut self) -> Result<ReadResult, ReadError> {
         match rustix::io::read(&self.fd, &mut self.buf[self.len..]) {
             Ok(bytes_read) => {
-                println!("Got {bytes_read:?} bytes from {:?}", self.fd);
                 self.len += bytes_read;
-                if bytes_read == 0 {
-                    let s = String::from_utf8(self.buf[..self.len].to_vec())
-                        .map_err(|_| ReadError::GotNonUtf8)?;
-
-                    Ok(ReadResult::Done(s))
+                if bytes_read == 0 || self.len == self.buf.len() {
+                    self.as_string()
                 } else {
                     Ok(ReadResult::Pending)
                 }
@@ -66,8 +62,25 @@ impl Reader {
         }
     }
 
+    fn as_string(&self) -> Result<ReadResult, ReadError> {
+        match std::str::from_utf8(&self.buf[..self.len]) {
+            Ok(s) => Ok(ReadResult::Done(s.to_string())),
+            Err(err) if self.len == self.buf.len() => {
+                let valid = err.valid_up_to();
+                Ok(ReadResult::Done(
+                    String::from_utf8_lossy(&self.buf[..valid]).into_owned(),
+                ))
+            }
+            Err(_) => Err(ReadError::GotNonUtf8),
+        }
+    }
+
     pub(crate) fn as_pollfd(&self) -> PollFd<'_> {
         PollFd::new(self, PollFlags::IN)
+    }
+
+    pub(crate) fn destroy(&self) {
+        self.offer.destroy();
     }
 }
 
@@ -80,11 +93,5 @@ impl AsFd for Reader {
 impl AsRawFd for Reader {
     fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
         self.fd.as_raw_fd()
-    }
-}
-
-impl Drop for Reader {
-    fn drop(&mut self) {
-        self.offer.destroy()
     }
 }

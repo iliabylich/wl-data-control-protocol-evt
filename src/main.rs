@@ -1,8 +1,11 @@
 use anyhow::{Context as _, Result, bail};
-use rustix::event::{PollFd, PollFlags, poll};
+use rustix::{
+    event::{PollFd, PollFlags, poll},
+    pipe::PipeFlags,
+};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    os::fd::{AsFd, AsRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd},
 };
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, event_created_child,
@@ -15,19 +18,73 @@ use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_source_v1::ExtDataControlSourceV1,
 };
 
-mod nonblocking;
-
 mod reader;
 use reader::{ReadResult, Reader};
 
-struct Writer {
-    fd: OwnedFd,
-    buf: Vec<u8>,
-}
+mod writer;
+use writer::{WriteResult, Writer};
 
-struct Incoming {
-    offer: ExtDataControlOfferV1,
-    mime_types: HashSet<String>,
+enum Incoming {
+    Some {
+        offer: ExtDataControlOfferV1,
+        mimes: HashSet<String>,
+    },
+    None,
+}
+enum IncomingMatch {
+    Matched(ExtDataControlOfferV1, HashSet<String>),
+    Mismatch(ExtDataControlOfferV1, ExtDataControlOfferV1),
+    NoMatch(ExtDataControlOfferV1),
+}
+enum AddMimeError {
+    OfferMismatch,
+    NoOffer,
+}
+impl Incoming {
+    pub(crate) fn start(&mut self, offer: ExtDataControlOfferV1) {
+        *self = Self::Some {
+            offer,
+            mimes: HashSet::new(),
+        }
+    }
+    pub(crate) fn add_mime(
+        &mut self,
+        offer: &ExtDataControlOfferV1,
+        mime: String,
+    ) -> Result<(), AddMimeError> {
+        if let Self::Some {
+            mimes,
+            offer: offer_,
+        } = self
+        {
+            if offer_ != offer {
+                return Err(AddMimeError::OfferMismatch);
+            }
+            mimes.insert(mime);
+            Ok(())
+        } else {
+            Err(AddMimeError::NoOffer)
+        }
+    }
+    pub(crate) fn take(&mut self) -> Self {
+        let mut this = Self::None;
+        core::mem::swap(self, &mut this);
+        this
+    }
+    pub(crate) fn match_on(self, next: ExtDataControlOfferV1) -> IncomingMatch {
+        match self {
+            Incoming::Some { offer: prev, mimes } if prev == next => {
+                IncomingMatch::Matched(prev, mimes)
+            }
+            Incoming::Some { offer: prev, .. } => IncomingMatch::Mismatch(prev, next),
+            Incoming::None => IncomingMatch::NoMatch(next),
+        }
+    }
+    pub(crate) fn destroy_if_present(&mut self) {
+        if let Incoming::Some { offer, .. } = self.take() {
+            offer.destroy();
+        }
+    }
 }
 
 struct State {
@@ -35,18 +92,72 @@ struct State {
     ext_data_control_manager: Option<ExtDataControlManagerV1>,
     ext_data_control_device: Option<ExtDataControlDeviceV1>,
 
-    incoming: Option<Incoming>,
+    incoming: Incoming,
 
-    // offer_to_mime_types: HashMap<ExtDataControlOfferV1, HashSet<String>>,
     source_to_text: HashMap<ExtDataControlSourceV1, String>,
 
-    own_mime_type: String,
+    mime_mask: String,
 
     readers_queue: VecDeque<Reader>,
     readers: HashMap<i32, Reader>,
 
-    writers_queue: VecDeque<(OwnedFd, Vec<u8>)>,
+    writers_queue: VecDeque<Writer>,
     writers: HashMap<i32, Writer>,
+
+    cancelled: bool,
+}
+
+impl State {
+    fn schedule_cleanup(&mut self) {
+        if let Some(wl_seat) = &self.wl_seat {
+            wl_seat.release();
+        }
+        self.wl_seat = None;
+
+        // --
+
+        if let Some(ext_data_control_manager) = &self.ext_data_control_manager {
+            ext_data_control_manager.destroy();
+        }
+        self.ext_data_control_manager = None;
+
+        // --
+
+        if let Some(ext_data_control_device) = &self.ext_data_control_device {
+            ext_data_control_device.destroy();
+        }
+        self.ext_data_control_device = None;
+
+        // --
+
+        self.incoming.destroy_if_present();
+
+        // --
+
+        for source in self.source_to_text.keys() {
+            source.destroy()
+        }
+        self.source_to_text.clear();
+
+        // --
+
+        for reader in &self.readers_queue {
+            reader.destroy();
+        }
+        self.readers_queue.clear();
+
+        // --
+
+        for reader in self.readers.values() {
+            reader.destroy();
+        }
+        self.readers.clear();
+
+        // --
+
+        self.writers.clear();
+        self.writers_queue.clear();
+    }
 }
 
 const TEXT_MIME: &str = "text/plain";
@@ -127,40 +238,74 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for State {
         use wayland_protocols::ext::data_control::v1::client::ext_data_control_device_v1::Event;
 
         match event {
-            Event::Selection { id: Some(offer) } => {
-                let incoming = state.incoming.take();
+            Event::Selection { id: Some(offer) } => match state.incoming.take().match_on(offer) {
+                IncomingMatch::Matched(offer, mimes) => {
+                    let mime_to_request = if mimes.contains(&state.mime_mask) {
+                        None
+                    } else if mimes.contains(TEXT_UTF8_MIME) {
+                        Some(TEXT_UTF8_MIME)
+                    } else if mimes.contains(TEXT_MIME) {
+                        Some(TEXT_MIME)
+                    } else {
+                        None
+                    };
 
-                if incoming.as_ref().is_some_and(|incoming| {
-                    incoming.offer == offer
-                        && incoming.mime_types.contains(TEXT_UTF8_MIME)
-                        && !incoming.mime_types.contains(&state.own_mime_type)
-                }) {
-                    let (reader, writer) = rustix::pipe::pipe().unwrap();
-                    offer.receive(String::from(TEXT_UTF8_MIME), writer.as_fd());
-                    drop(writer);
-                    state.readers_queue.push_back(Reader::new(reader, offer));
-                } else {
+                    if let Some(mime) = mime_to_request {
+                        match rustix::pipe::pipe_with(PipeFlags::NONBLOCK) {
+                            Ok((reader, writer)) => {
+                                offer.receive(String::from(mime), writer.as_fd());
+                                drop(writer);
+                                state.readers_queue.push_back(Reader::new(reader, offer));
+                            }
+                            Err(err) => {
+                                eprintln!("failed to create pipe: {err:?}");
+                                offer.destroy();
+                            }
+                        }
+                    } else {
+                        offer.destroy();
+                    }
+                }
+                IncomingMatch::Mismatch(prev, next) => {
+                    eprintln!("Something is wrong with the sequence of events");
+                    eprintln!("Selection->offer doesn't match state->incoming");
+                    prev.destroy();
+                    next.destroy();
+                }
+                IncomingMatch::NoMatch(offer) => {
                     offer.destroy();
                 }
-            }
+            },
             Event::PrimarySelection { id: Some(offer) } => {
-                assert!(state.incoming.as_ref().is_some_and(|i| i.offer == offer));
-                state.incoming = None;
-                offer.destroy();
+                match state.incoming.take().match_on(offer) {
+                    IncomingMatch::Matched(same, _) => {
+                        same.destroy();
+                    }
+                    IncomingMatch::Mismatch(prev, next) => {
+                        eprintln!("Something is wrong with the sequence of events");
+                        eprintln!("PrimarySelection->offer doesn't match state->incoming");
+                        prev.destroy();
+                        next.destroy();
+                    }
+                    IncomingMatch::NoMatch(offer) => {
+                        offer.destroy();
+                    }
+                }
             }
             Event::DataOffer { id: offer } => {
-                state.incoming = Some(Incoming {
-                    offer,
-                    mime_types: HashSet::new(),
-                })
+                state.incoming.destroy_if_present();
+                state.incoming.start(offer);
             }
-            Event::Finished => {}
+            Event::Finished => {
+                eprintln!("ExtDataControlDeviceV1 has finished");
+                state.cancelled = true;
+            }
 
             Event::Selection { id: None } | Event::PrimarySelection { id: None } => {
-                state.incoming = None;
+                state.incoming.destroy_if_present();
             }
 
-            event => todo!("unsuported ExtDataControlDeviceV1 event: {event:?}"),
+            event => unreachable!("unsuported ExtDataControlDeviceV1 event: {event:?}"),
         }
     }
 
@@ -185,9 +330,19 @@ impl Dispatch<ExtDataControlOfferV1, ()> for State {
     ) {
         match event {
             ext_data_control_offer_v1::Event::Offer { mime_type } => {
-                if let Some(incoming_offer) = &mut state.incoming {
-                    assert_eq!(&incoming_offer.offer, proxy);
-                    incoming_offer.mime_types.insert(mime_type);
+                if let Err(err) = state.incoming.add_mime(proxy, mime_type) {
+                    match err {
+                        AddMimeError::OfferMismatch => {
+                            eprintln!("Wrong sequence of events");
+                            eprintln!("Got mime type offer for a different offer");
+                            state.incoming.destroy_if_present();
+                        }
+                        AddMimeError::NoOffer => {
+                            eprintln!("Wrong sequence of events");
+                            eprintln!("Got mime typer offer before receiing a data offer");
+                            state.incoming.destroy_if_present();
+                        }
+                    }
                 }
             }
             _ => unreachable!(),
@@ -210,12 +365,16 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
             Event::Send { mime_type, fd } => {
                 if mime_type == TEXT_UTF8_MIME || mime_type == TEXT_MIME {
                     if let Some(text) = state.source_to_text.get(proxy).cloned() {
-                        state.writers_queue.push_back((fd, text.into_bytes()));
+                        match Writer::new(fd, text) {
+                            Ok(writer) => state.writers_queue.push_back(writer),
+                            Err(err) => eprintln!("{err:?}"),
+                        }
                     }
                 }
             }
             Event::Cancelled => {
                 state.source_to_text.remove(proxy);
+                proxy.destroy();
             }
             _ => todo!(),
         }
@@ -231,16 +390,21 @@ fn main() -> Result<()> {
         wl_seat: None,
         ext_data_control_manager: None,
         ext_data_control_device: None,
-        incoming: None,
+        incoming: Incoming::None,
         source_to_text: HashMap::new(),
 
-        own_mime_type: format!("text/plain;sent-by-pid-{}", std::process::id()),
+        mime_mask: format!(
+            "application/x-wayland-clipboard-poll-pid-{}",
+            std::process::id()
+        ),
 
         readers: HashMap::new(),
         readers_queue: VecDeque::new(),
 
         writers: HashMap::new(),
         writers_queue: VecDeque::new(),
+
+        cancelled: false,
     };
 
     let display = conn.display();
@@ -250,20 +414,20 @@ fn main() -> Result<()> {
         bail!("Wayland protocol 'ext_data_control_v1' is not supported by your compositor");
     }
 
-    // if let Some(ext_data_control_manager) = &state.ext_data_control_manager
-    //     && let Some(ext_data_control_device) = &state.ext_data_control_device
-    // {
-    //     let source = ext_data_control_manager.create_data_source(&queue.handle(), ());
-    //     source.offer("text/plain;charset=utf-8".to_string());
-    //     source.offer("text/plain".to_string());
-    //     source.offer(format!("text/plain;sent-by-pid-{}", std::process::id()));
+    if let Some(ext_data_control_manager) = &state.ext_data_control_manager
+        && let Some(ext_data_control_device) = &state.ext_data_control_device
+    {
+        let source = ext_data_control_manager.create_data_source(&queue.handle(), ());
+        source.offer("text/plain;charset=utf-8".to_string());
+        source.offer("text/plain".to_string());
+        source.offer(state.mime_mask.clone());
 
-    //     ext_data_control_device.set_selection(Some(&source));
-    //     state.source_to_text.insert(source, String::from("FOO"));
-    //     queue.flush()?;
-    // }
+        ext_data_control_device.set_selection(Some(&source));
+        state.source_to_text.insert(source, String::from("FOO"));
+        queue.flush()?;
+    }
 
-    loop {
+    while !state.cancelled {
         println!("iteration");
         queue.flush()?;
         queue.dispatch_pending(&mut state)?;
@@ -271,13 +435,11 @@ fn main() -> Result<()> {
             .prepare_read()
             .context("failed to create ReadEventsGuard")?;
 
-        let mut pollfds = state
-            .readers
-            .values()
-            .map(Reader::as_pollfd)
+        let mut pollfds = std::iter::empty()
+            .chain(state.readers.values().map(Reader::as_pollfd))
+            .chain(state.writers.values().map(Writer::as_pollfd))
             .chain([PollFd::new(&wl_fd, PollFlags::IN)])
             .collect::<Vec<_>>();
-        // println!("{pollfds:?}");
         poll(&mut pollfds, None)?;
         let fd_to_revents = pollfds
             .into_iter()
@@ -293,19 +455,48 @@ fn main() -> Result<()> {
         if wl_is_readable {
             wl_read_guard.read()?;
             queue.dispatch_pending(&mut state)?;
+        } else {
+            drop(wl_read_guard);
         }
 
+        use std::collections::hash_map::Entry;
+
         for reader_fd in ready_reader_fds {
-            if let Some(reader) = state.readers.get_mut(&reader_fd) {
+            if let Entry::Occupied(mut entry) = state.readers.entry(reader_fd) {
+                let reader = entry.get_mut();
                 match reader.read() {
                     Ok(ReadResult::Done(text)) => {
                         println!("Got text {text:?}");
-                        state.readers.remove(&reader_fd);
+                        reader.destroy();
+                        entry.remove();
+
+                        if text == "EXIT" {
+                            state.cancelled = true;
+                        }
                     }
                     Ok(ReadResult::Pending) => {}
                     Err(err) => {
                         println!("reader {:?} returned error {err:?}", reader.as_raw_fd());
-                        state.readers.remove(&reader_fd);
+                        reader.destroy();
+                        entry.remove();
+                    }
+                }
+            }
+        }
+
+        for writer_fd in ready_writer_fds {
+            if let Entry::Occupied(mut entry) = state.writers.entry(writer_fd) {
+                let writer = entry.get_mut();
+                println!("Writing {:?}", writer.as_raw_fd());
+                match writer.write() {
+                    Ok(WriteResult::Done) => {
+                        println!("Done writing to {:?}", writer.as_raw_fd());
+                        entry.remove();
+                    }
+                    Ok(WriteResult::Pending) => {}
+                    Err(err) => {
+                        println!("writer {:?} returned error {err:?}", writer.as_raw_fd());
+                        entry.remove();
                     }
                 }
             }
@@ -318,27 +509,18 @@ fn main() -> Result<()> {
             println!("Got new reader, adding to staate {:?}", reader.as_raw_fd());
             state.readers.insert(reader.as_raw_fd(), reader);
         }
-    }
-}
-
-#[derive(Debug)]
-enum REvents {
-    IN,
-    OUT,
-}
-impl REvents {
-    fn new(fd: i32, revents: PollFlags) -> Result<Option<Self>> {
-        if revents.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL) {
-            bail!("FD {fd} returned revents {revents:?}");
-        } else if revents.contains(PollFlags::IN) {
-            Ok(Some(Self::IN))
-        } else if revents.contains(PollFlags::OUT) {
-            Ok(Some(Self::OUT))
-        } else {
-            Ok(None)
+        while let Some(writer) = state.writers_queue.pop_front() {
+            println!("Got new writer, adding to staate {:?}", writer.as_raw_fd());
+            state.writers.insert(writer.as_raw_fd(), writer);
         }
     }
+
+    state.schedule_cleanup();
+    queue.flush()?;
+
+    Ok(())
 }
+
 fn classify_pollfds(
     pollfds: &[(i32, PollFlags)],
     wl_fd: i32,
@@ -349,6 +531,8 @@ fn classify_pollfds(
     let mut readable_readers = vec![];
     let mut writable_writers = vec![];
 
+    use std::collections::hash_map::Entry;
+
     for (fd, revents) in pollfds {
         if *fd == wl_fd {
             if revents.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL) {
@@ -356,18 +540,19 @@ fn classify_pollfds(
             } else if revents.contains(PollFlags::IN) {
                 wl_is_readable = true;
             }
-        } else if readers.contains_key(fd) {
+        } else if let Entry::Occupied(entry) = readers.entry(*fd) {
             if revents.intersects(PollFlags::ERR | PollFlags::NVAL) {
                 println!("Reader with FD {fd} returned revents {revents:?}, removing it");
-                readers.remove(fd).unwrap();
+                let reader = entry.remove();
+                reader.destroy();
             } else if revents.intersects(PollFlags::IN | PollFlags::HUP) {
                 readable_readers.push(*fd);
             }
-        } else if writers.contains_key(fd) {
-            if revents.intersects(PollFlags::ERR | PollFlags::NVAL) {
+        } else if let Entry::Occupied(entry) = writers.entry(*fd) {
+            if revents.intersects(PollFlags::ERR | PollFlags::NVAL | PollFlags::HUP) {
                 println!("Writer with FD {fd} returned revents {revents:?}, removing it");
-                writers.remove(fd).unwrap();
-            } else if revents.contains(PollFlags::IN) {
+                entry.remove();
+            } else if revents.contains(PollFlags::OUT) {
                 writable_writers.push(*fd);
             }
         }

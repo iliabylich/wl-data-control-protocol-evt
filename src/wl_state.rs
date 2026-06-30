@@ -11,12 +11,12 @@ use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_source_v1::ExtDataControlSourceV1,
 };
 
-pub(crate) struct WaylandState {
+pub(crate) struct WlState {
     pub(crate) registry_events: VecDeque<WlRegistryEvent>,
     pub(crate) events: VecDeque<WlEvent>,
 }
 
-impl WaylandState {
+impl WlState {
     pub(crate) fn new() -> Self {
         Self {
             registry_events: VecDeque::new(),
@@ -25,7 +25,7 @@ impl WaylandState {
     }
 }
 
-impl Dispatch<WlRegistry, ()> for WaylandState {
+impl Dispatch<WlRegistry, ()> for WlState {
     fn event(
         wl: &mut Self,
         _registry: &WlRegistry,
@@ -44,7 +44,7 @@ impl Dispatch<WlRegistry, ()> for WaylandState {
     }
 }
 
-impl Dispatch<WlSeat, ()> for WaylandState {
+impl Dispatch<WlSeat, ()> for WlState {
     fn event(
         _wl: &mut Self,
         _proxy: &WlSeat,
@@ -56,7 +56,7 @@ impl Dispatch<WlSeat, ()> for WaylandState {
     }
 }
 
-impl Dispatch<ExtDataControlManagerV1, ()> for WaylandState {
+impl Dispatch<ExtDataControlManagerV1, ()> for WlState {
     fn event(
         _wl: &mut Self,
         _proxy: &ExtDataControlManagerV1,
@@ -68,7 +68,7 @@ impl Dispatch<ExtDataControlManagerV1, ()> for WaylandState {
     }
 }
 
-impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
+impl Dispatch<ExtDataControlDeviceV1, ()> for WlState {
     fn event(
         wl: &mut Self,
         _proxy: &ExtDataControlDeviceV1,
@@ -86,7 +86,7 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
         }
     }
 
-    event_created_child!(WaylandState,
+    event_created_child!(WlState,
         ExtDataControlDeviceV1, [
             ext_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (
                 ExtDataControlOfferV1,
@@ -96,7 +96,7 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
     );
 }
 
-impl Dispatch<ExtDataControlOfferV1, ()> for WaylandState {
+impl Dispatch<ExtDataControlOfferV1, ()> for WlState {
     fn event(
         wl: &mut Self,
         proxy: &ExtDataControlOfferV1,
@@ -115,7 +115,7 @@ impl Dispatch<ExtDataControlOfferV1, ()> for WaylandState {
     }
 }
 
-impl Dispatch<ExtDataControlSourceV1, ()> for WaylandState {
+impl Dispatch<ExtDataControlSourceV1, ()> for WlState {
     fn event(
         wl: &mut Self,
         proxy: &ExtDataControlSourceV1,

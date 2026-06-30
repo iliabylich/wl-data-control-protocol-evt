@@ -18,13 +18,16 @@ mod writer;
 use writer::{WriteResult, Writer};
 
 mod offer_seq;
-use offer_seq::{FinishedOfferSeq, OfferSeq};
+use offer_seq::OfferSeq;
 
 mod wl_event;
 use wl_event::WlEvent;
 
 mod wl_state;
-use wl_state::WaylandState;
+use wl_state::WlState;
+
+mod mime_types;
+use mime_types::MimeTypes;
 
 use crate::wl_event::{WlOfferEvent, WlRegistryEvent, WlSourceEvent};
 
@@ -35,11 +38,11 @@ struct State {
 
     running: bool,
     conn: Connection,
-    queue: EventQueue<WaylandState>,
-    wl: WaylandState,
+    queue: EventQueue<WlState>,
+    wl: WlState,
     readers: HashMap<i32, Reader>,
     writers: HashMap<i32, Writer>,
-    mime_mask: String,
+    mime_types: MimeTypes,
 
     offer_seq: OfferSeq,
 
@@ -73,8 +76,8 @@ impl core::error::Error for ConnectError {}
 impl State {
     fn connect() -> Result<Self, ConnectError> {
         let conn = Connection::connect_to_env().map_err(ConnectError::WaylandConnectError)?;
-        let mut wl = WaylandState::new();
-        let mut queue = conn.new_event_queue::<WaylandState>();
+        let mut wl = WlState::new();
+        let mut queue = conn.new_event_queue::<WlState>();
 
         let registry = conn.display().get_registry(&queue.handle(), ());
         queue
@@ -114,10 +117,7 @@ impl State {
             conn,
             readers: HashMap::new(),
             writers: HashMap::new(),
-            mime_mask: format!(
-                "application/x-wayland-clipboard-poll-pid-{}",
-                std::process::id()
-            ),
+            mime_types: MimeTypes::new(),
 
             offer_seq: OfferSeq::Empty,
             source_to_text: HashMap::new(),
@@ -141,65 +141,38 @@ impl State {
             }
 
             WlOfferEvent::MimeTime(offer, mime_type) => {
-                self.offer_seq.extend(&offer, mime_type);
+                self.offer_seq.extend(offer, mime_type);
             }
 
-            WlOfferEvent::Selection(Some(offer)) => match self.offer_seq.finish(offer) {
-                FinishedOfferSeq::Ok(offer, mimes) => {
-                    let mime_type_to_ask_for = if mimes.contains(&self.mime_mask) {
-                        None
-                    } else if mimes.contains(MIME_TYPE_TEXT_UTF8) {
-                        Some(MIME_TYPE_TEXT_UTF8)
-                    } else if mimes.contains(MIME_TYPE_TEXT) {
-                        Some(MIME_TYPE_TEXT)
-                    } else {
-                        None
-                    };
+            WlOfferEvent::Selection(Some(offer)) => {
+                let Some((offer, mime_types)) = self.offer_seq.finish(offer) else {
+                    return;
+                };
+                let Some(mime_type_to_ask_for) = self.mime_types.choose(mime_types) else {
+                    offer.destroy();
+                    return;
+                };
 
-                    if let Some(mime_type) = mime_type_to_ask_for {
-                        match rustix::pipe::pipe_with(PipeFlags::NONBLOCK) {
-                            Ok((reader, writer)) => {
-                                offer.receive(String::from(mime_type), writer.as_fd());
-                                drop(writer);
-                                self.readers_queue.push_back(Reader::new(reader, offer));
-                            }
-                            Err(err) => {
-                                log::error!("failed to create pipe: {err:?}");
-                                offer.destroy();
-                            }
-                        }
-                    } else {
+                match rustix::pipe::pipe_with(PipeFlags::NONBLOCK) {
+                    Ok((reader, writer)) => {
+                        offer.receive(mime_type_to_ask_for, writer.as_fd());
+                        drop(writer);
+                        self.readers_queue.push_back(Reader::new(reader, offer));
+                    }
+                    Err(err) => {
+                        log::error!("failed to create pipe: {err:?}");
                         offer.destroy();
                     }
                 }
-                FinishedOfferSeq::Mismatch(prev, next) => {
-                    log::error!("Something is wrong with the sequence of events");
-                    log::error!("Selection->offer doesn't match state->incoming");
-                    prev.destroy();
-                    next.destroy();
-                }
-                FinishedOfferSeq::Err(offer) => {
-                    offer.destroy();
-                }
-            },
+            }
             WlOfferEvent::Selection(None) => {
                 self.offer_seq.destroy();
             }
 
-            WlOfferEvent::PrimarySelection(Some(offer)) => match self.offer_seq.finish(offer) {
-                FinishedOfferSeq::Ok(same, _) => {
-                    same.destroy();
-                }
-                FinishedOfferSeq::Mismatch(prev, next) => {
-                    log::error!("Something is wrong with the sequence of events");
-                    log::error!("PrimarySelection->offer doesn't match state->incoming");
-                    prev.destroy();
-                    next.destroy();
-                }
-                FinishedOfferSeq::Err(offer) => {
-                    offer.destroy();
-                }
-            },
+            WlOfferEvent::PrimarySelection(Some(offer)) => {
+                self.offer_seq.destroy();
+                offer.destroy();
+            }
             WlOfferEvent::PrimarySelection(None) => {
                 self.offer_seq.destroy();
             }
@@ -214,13 +187,16 @@ impl State {
     fn handle_source_event(&mut self, event: WlSourceEvent) {
         match event {
             WlSourceEvent::Requested(source, mime_type, fd) => {
-                if mime_type == MIME_TYPE_TEXT_UTF8 || mime_type == MIME_TYPE_TEXT {
-                    if let Some(text) = self.source_to_text.get(&source).cloned() {
-                        match Writer::new(fd, text) {
-                            Ok(writer) => self.writers_queue.push_back(writer),
-                            Err(err) => log::error!("{err:?}"),
-                        }
-                    }
+                if !MimeTypes::is_text(&mime_type) {
+                    return;
+                }
+                let Some(text) = self.source_to_text.get(&source) else {
+                    return;
+                };
+
+                match Writer::new(fd, text.clone()) {
+                    Ok(writer) => self.writers_queue.push_back(writer),
+                    Err(err) => log::error!("{err:?}"),
                 }
             }
             WlSourceEvent::Cancelled(source) => {
@@ -230,32 +206,27 @@ impl State {
         }
     }
 
-    fn cleanup(&mut self) -> Result<()> {
+    fn cleanup(&mut self) {
         self.ext_data_control_device.destroy();
         self.wl_seat.release();
         self.ext_data_control_manager.destroy();
 
-        for reader in core::mem::take(&mut self.readers).into_values() {
+        for reader in self.readers.values() {
             reader.destroy();
         }
-        self.writers.clear();
         self.offer_seq.destroy();
-        for source in core::mem::take(&mut self.source_to_text).into_keys() {
+        for source in self.source_to_text.keys() {
             source.destroy()
         }
         for reader in core::mem::take(&mut self.readers_queue) {
             reader.destroy();
         }
 
-        self.writers_queue.clear();
-
-        self.queue.flush()?;
-        Ok(())
+        if let Err(err) = self.queue.flush() {
+            log::error!("failed to finish cleanup: {err:?}");
+        }
     }
 }
-
-const MIME_TYPE_TEXT: &str = "text/plain";
-const MIME_TYPE_TEXT_UTF8: &str = "text/plain;charset=utf-8";
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -267,7 +238,7 @@ fn main() -> Result<()> {
         .create_data_source(&state.queue.handle(), ());
     source.offer("text/plain;charset=utf-8".to_string());
     source.offer("text/plain".to_string());
-    source.offer(state.mime_mask.clone());
+    source.offer(state.mime_types.mask().to_string());
 
     state.ext_data_control_device.set_selection(Some(&source));
     state.source_to_text.insert(source, String::from("FOO"));
@@ -398,7 +369,7 @@ fn main() -> Result<()> {
         }
     }
 
-    state.cleanup()?;
+    state.cleanup();
 
     Ok(())
 }

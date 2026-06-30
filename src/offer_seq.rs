@@ -1,64 +1,79 @@
 use std::collections::HashSet;
 use wayland_protocols::ext::data_control::v1::client::ext_data_control_offer_v1::ExtDataControlOfferV1;
 
+#[derive(Default)]
 pub(crate) enum OfferSeq {
+    #[default]
     Empty,
     Started {
         offer: ExtDataControlOfferV1,
-        mimes: HashSet<String>,
+        mime_types: HashSet<String>,
     },
-}
-
-pub(crate) enum FinishedOfferSeq {
-    Ok(ExtDataControlOfferV1, HashSet<String>),
-    Mismatch(ExtDataControlOfferV1, ExtDataControlOfferV1),
-    Err(ExtDataControlOfferV1),
 }
 
 impl OfferSeq {
     pub(crate) fn start(&mut self, start_offer: ExtDataControlOfferV1) {
-        self.destroy();
         *self = Self::Started {
             offer: start_offer,
-            mimes: HashSet::new(),
+            mime_types: HashSet::new(),
         }
     }
 
-    pub(crate) fn extend(&mut self, mime_offer: &ExtDataControlOfferV1, mime_type: String) {
-        if let Self::Started { mimes, offer } = self {
-            if offer == mime_offer {
-                mimes.insert(mime_type);
-            } else {
+    pub(crate) fn extend(&mut self, mime_offer: ExtDataControlOfferV1, mime_type: String) {
+        match std::mem::take(self) {
+            Self::Empty => {
                 log::error!("Wrong sequence of events");
-                log::error!("Got mime type offer for a different offer");
-                self.destroy();
-                return;
+                log::error!("Got mime type on Empty sequence");
+                mime_offer.destroy();
             }
-        } else {
-            log::error!("Wrong sequence of events");
-            log::error!("Got mime typer offer before receiing a data offer");
+            Self::Started {
+                offer,
+                mut mime_types,
+            } => {
+                if offer == mime_offer {
+                    mime_types.insert(mime_type);
+                    *self = Self::Started { offer, mime_types };
+                } else {
+                    log::error!("Wrong sequence of events");
+                    log::error!("Got mime type for different offer");
+                    offer.destroy();
+                    mime_offer.destroy();
+                    *self = Self::Empty;
+                }
+            }
         }
     }
 
-    fn take(&mut self) -> Self {
-        let mut this = Self::Empty;
-        core::mem::swap(self, &mut this);
-        this
-    }
-
-    pub(crate) fn finish(&mut self, finish_offer: ExtDataControlOfferV1) -> FinishedOfferSeq {
-        match self.take() {
-            Self::Started { offer, mimes } if offer == finish_offer => {
-                FinishedOfferSeq::Ok(offer, mimes)
+    pub(crate) fn finish(
+        &mut self,
+        finish_offer: ExtDataControlOfferV1,
+    ) -> Option<(ExtDataControlOfferV1, HashSet<String>)> {
+        match std::mem::take(self) {
+            OfferSeq::Empty => {
+                log::error!("Wrong sequence of events");
+                log::error!("Can't finish Empty sequence");
+                finish_offer.destroy();
+                None
             }
-            Self::Started { offer, .. } => FinishedOfferSeq::Mismatch(offer, finish_offer),
-            Self::Empty => FinishedOfferSeq::Err(finish_offer),
+            OfferSeq::Started { offer, mime_types } => {
+                if offer == finish_offer {
+                    Some((offer, mime_types))
+                } else {
+                    log::error!("Wrong sequence of events");
+                    log::error!("Got finish event for different offer");
+                    offer.destroy();
+                    finish_offer.destroy();
+                    *self = Self::Empty;
+                    None
+                }
+            }
         }
     }
 
     pub(crate) fn destroy(&mut self) {
-        if let Self::Started { offer, .. } = self.take() {
-            offer.destroy();
+        match std::mem::take(self) {
+            Self::Empty => {}
+            Self::Started { offer, .. } => offer.destroy(),
         }
     }
 }

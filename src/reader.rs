@@ -1,7 +1,4 @@
-use rustix::{
-    event::{PollFd, PollFlags},
-    io::Errno,
-};
+use rustix::io::Errno;
 use std::{
     io::ErrorKind,
     os::fd::{AsFd, AsRawFd, OwnedFd},
@@ -73,10 +70,6 @@ impl Reader {
             }
             Err(_) => Err(ReadError::GotNonUtf8),
         }
-    }
-
-    pub(crate) fn as_pollfd(&self) -> PollFd<'_> {
-        PollFd::new(self, PollFlags::IN)
     }
 
     pub(crate) fn destroy(&self) {

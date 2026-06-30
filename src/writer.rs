@@ -1,5 +1,4 @@
 use rustix::{
-    event::{PollFd, PollFlags},
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
     io::Errno,
 };
@@ -63,10 +62,6 @@ impl Writer {
             Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(WriteResult::Pending),
             Err(err) => Err(err),
         }
-    }
-
-    pub(crate) fn as_pollfd(&self) -> PollFd<'_> {
-        PollFd::new(&self.fd, PollFlags::OUT)
     }
 }
 

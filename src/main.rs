@@ -1,8 +1,5 @@
 use anyhow::{Context as _, Result, bail};
-use rustix::{
-    event::{PollFd, PollFlags, poll},
-    pipe::PipeFlags,
-};
+use rustix::{buffer::spare_capacity, event::epoll, pipe::PipeFlags};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     os::fd::{AsFd, AsRawFd},
@@ -88,6 +85,7 @@ impl Incoming {
 }
 
 struct State {
+    wl_fd: i32,
     wl_seat: Option<WlSeat>,
     ext_data_control_manager: Option<ExtDataControlManagerV1>,
     ext_data_control_device: Option<ExtDataControlDeviceV1>,
@@ -384,9 +382,18 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
 fn main() -> Result<()> {
     let conn = Connection::connect_to_env()?;
     let wl_fd = conn.as_fd();
+    let epoll = epoll::create(epoll::CreateFlags::CLOEXEC)?;
+    epoll::add(
+        &epoll,
+        wl_fd,
+        epoll::EventData::new_u64(wl_fd.as_raw_fd() as u64),
+        epoll::EventFlags::IN,
+    )?;
+    let mut epoll_events = Vec::with_capacity(16);
 
     let mut queue = conn.new_event_queue::<State>();
     let mut state = State {
+        wl_fd: wl_fd.as_raw_fd(),
         wl_seat: None,
         ext_data_control_manager: None,
         ext_data_control_device: None,
@@ -434,26 +441,41 @@ fn main() -> Result<()> {
         println!("iteration");
         queue.flush()?;
         queue.dispatch_pending(&mut state)?;
+
+        while let Some(reader) = state.readers_queue.pop_front() {
+            println!("Got new reader, adding to state {:?}", reader.as_raw_fd());
+            epoll::add(
+                &epoll,
+                &reader,
+                epoll::EventData::new_u64(reader.as_raw_fd() as u64),
+                epoll::EventFlags::IN,
+            )?;
+            state.readers.insert(reader.as_raw_fd(), reader);
+        }
+
+        while let Some(writer) = state.writers_queue.pop_front() {
+            println!("Got new writer, adding to state {:?}", writer.as_raw_fd());
+            epoll::add(
+                &epoll,
+                &writer,
+                epoll::EventData::new_u64(writer.as_raw_fd() as u64),
+                epoll::EventFlags::OUT,
+            )?;
+            state.writers.insert(writer.as_raw_fd(), writer);
+        }
+
+        queue.flush()?;
         let wl_read_guard = queue
             .prepare_read()
             .context("failed to create ReadEventsGuard")?;
 
-        let mut pollfds = core::iter::empty()
-            .chain(state.readers.values().map(Reader::as_pollfd))
-            .chain(state.writers.values().map(Writer::as_pollfd))
-            .chain([PollFd::new(&wl_fd, PollFlags::IN)])
-            .collect::<Vec<_>>();
-        poll(&mut pollfds, None)?;
-        let fd_to_revents = pollfds
-            .into_iter()
-            .map(|pollfd| (pollfd.as_fd().as_raw_fd(), pollfd.revents()))
-            .collect::<Vec<_>>();
-        let (wl_is_readable, ready_reader_fds, ready_writer_fds) = classify_pollfds(
-            &fd_to_revents,
-            wl_fd.as_raw_fd(),
-            &mut state.readers,
-            &mut state.writers,
-        )?;
+        epoll::wait(&epoll, spare_capacity(&mut epoll_events), None)?;
+        let EpollResult {
+            wl_is_readable,
+            readers,
+            writers,
+        } = EpollResult::new(&epoll_events, &state)?;
+        epoll_events.clear();
 
         if wl_is_readable {
             wl_read_guard.read()?;
@@ -464,12 +486,28 @@ fn main() -> Result<()> {
 
         use std::collections::hash_map::Entry;
 
-        for reader_fd in ready_reader_fds {
-            if let Entry::Occupied(mut entry) = state.readers.entry(reader_fd) {
+        for fd in readers.dead {
+            if let Entry::Occupied(entry) = state.readers.entry(fd) {
+                let reader = entry.remove();
+                epoll::delete(&epoll, &reader)?;
+                reader.destroy();
+            }
+        }
+
+        for writer_fd in writers.dead {
+            if let Entry::Occupied(entry) = state.writers.entry(writer_fd) {
+                let writer = entry.remove();
+                epoll::delete(&epoll, &writer)?;
+            }
+        }
+
+        for fd in readers.ready {
+            if let Entry::Occupied(mut entry) = state.readers.entry(fd) {
                 let reader = entry.get_mut();
                 match reader.read() {
                     Ok(ReadResult::Done(text)) => {
                         println!("Got text {text:?}");
+                        epoll::delete(&epoll, &mut *reader)?;
                         reader.destroy();
                         entry.remove();
 
@@ -480,6 +518,7 @@ fn main() -> Result<()> {
                     Ok(ReadResult::Pending) => {}
                     Err(err) => {
                         println!("reader {:?} returned error {err:?}", reader.as_raw_fd());
+                        epoll::delete(&epoll, &mut *reader)?;
                         reader.destroy();
                         entry.remove();
                     }
@@ -487,34 +526,24 @@ fn main() -> Result<()> {
             }
         }
 
-        for writer_fd in ready_writer_fds {
-            if let Entry::Occupied(mut entry) = state.writers.entry(writer_fd) {
+        for fd in writers.ready {
+            if let Entry::Occupied(mut entry) = state.writers.entry(fd) {
                 let writer = entry.get_mut();
                 println!("Writing {:?}", writer.as_raw_fd());
                 match writer.write() {
                     Ok(WriteResult::Done) => {
                         println!("Done writing to {:?}", writer.as_raw_fd());
+                        epoll::delete(&epoll, writer)?;
                         entry.remove();
                     }
                     Ok(WriteResult::Pending) => {}
                     Err(err) => {
                         println!("writer {:?} returned error {err:?}", writer.as_raw_fd());
+                        epoll::delete(&epoll, writer)?;
                         entry.remove();
                     }
                 }
             }
-        }
-
-        if !state.readers_queue.is_empty() {
-            queue.flush()?;
-        }
-        while let Some(reader) = state.readers_queue.pop_front() {
-            println!("Got new reader, adding to staate {:?}", reader.as_raw_fd());
-            state.readers.insert(reader.as_raw_fd(), reader);
-        }
-        while let Some(writer) = state.writers_queue.pop_front() {
-            println!("Got new writer, adding to staate {:?}", writer.as_raw_fd());
-            state.writers.insert(writer.as_raw_fd(), writer);
         }
     }
 
@@ -524,42 +553,56 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn classify_pollfds(
-    pollfds: &[(i32, PollFlags)],
-    wl_fd: i32,
-    readers: &mut HashMap<i32, Reader>,
-    writers: &mut HashMap<i32, Writer>,
-) -> Result<(bool, Vec<i32>, Vec<i32>)> {
-    let mut wl_is_readable = false;
-    let mut readable_readers = vec![];
-    let mut writable_writers = vec![];
+#[derive(Default)]
+struct FdSet {
+    ready: Vec<i32>,
+    dead: Vec<i32>,
+}
 
-    use std::collections::hash_map::Entry;
+#[derive(Default)]
+struct EpollResult {
+    wl_is_readable: bool,
+    readers: FdSet,
+    writers: FdSet,
+}
 
-    for (fd, revents) in pollfds {
-        if *fd == wl_fd {
-            if revents.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL) {
-                bail!("Wayland returned revents {revents:?}");
-            } else if revents.contains(PollFlags::IN) {
-                wl_is_readable = true;
-            }
-        } else if let Entry::Occupied(entry) = readers.entry(*fd) {
-            if revents.intersects(PollFlags::ERR | PollFlags::NVAL) {
-                println!("Reader with FD {fd} returned revents {revents:?}, removing it");
-                let reader = entry.remove();
-                reader.destroy();
-            } else if revents.intersects(PollFlags::IN | PollFlags::HUP) {
-                readable_readers.push(*fd);
-            }
-        } else if let Entry::Occupied(entry) = writers.entry(*fd) {
-            if revents.intersects(PollFlags::ERR | PollFlags::NVAL | PollFlags::HUP) {
-                println!("Writer with FD {fd} returned revents {revents:?}, removing it");
-                entry.remove();
-            } else if revents.contains(PollFlags::OUT) {
-                writable_writers.push(*fd);
+impl EpollResult {
+    fn new(events: &[epoll::Event], state: &State) -> Result<Self> {
+        let mut wl_is_readable = false;
+        let mut readers = FdSet::default();
+        let mut writers = FdSet::default();
+
+        for event in events {
+            let fd = event.data.u64() as i32;
+            let revents: epoll::EventFlags = event.flags;
+
+            if fd == state.wl_fd {
+                if revents.intersects(epoll::EventFlags::HUP | epoll::EventFlags::ERR) {
+                    bail!("Wayland returned revents {revents:?}");
+                } else if revents.contains(epoll::EventFlags::IN) {
+                    wl_is_readable = true;
+                }
+            } else if state.readers.contains_key(&fd) {
+                if revents.intersects(epoll::EventFlags::ERR) {
+                    println!("Reader with FD {fd} returned revents {revents:?}, removing it");
+                    readers.dead.push(fd);
+                } else if revents.intersects(epoll::EventFlags::IN | epoll::EventFlags::HUP) {
+                    readers.ready.push(fd);
+                }
+            } else if state.writers.contains_key(&fd) {
+                if revents.intersects(epoll::EventFlags::ERR | epoll::EventFlags::HUP) {
+                    println!("Writer with FD {fd} returned revents {revents:?}, removing it");
+                    writers.dead.push(fd);
+                } else if revents.contains(epoll::EventFlags::OUT) {
+                    writers.ready.push(fd);
+                }
             }
         }
-    }
 
-    Ok((wl_is_readable, readable_readers, writable_writers))
+        Ok(EpollResult {
+            wl_is_readable,
+            readers,
+            writers,
+        })
+    }
 }

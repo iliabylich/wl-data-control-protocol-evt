@@ -10,8 +10,25 @@ pub(crate) struct Epoll {
     wl_fd: i32,
 }
 
+#[derive(Debug)]
+pub(crate) struct EpollError(Errno);
+
+impl From<Errno> for EpollError {
+    fn from(errno: Errno) -> Self {
+        Self(errno)
+    }
+}
+
+impl core::fmt::Display for EpollError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "EpollError({})", self.0)
+    }
+}
+
+impl core::error::Error for EpollError {}
+
 impl Epoll {
-    pub(crate) fn new(wl_fd: &impl AsFd) -> Result<Self, Errno> {
+    pub(crate) fn new(wl_fd: &impl AsFd) -> Result<Self, EpollError> {
         let epollfd = epoll::create(epoll::CreateFlags::CLOEXEC)?;
 
         epoll::add(
@@ -27,26 +44,29 @@ impl Epoll {
         })
     }
 
-    pub(crate) fn add_reader(&mut self, reader: &Reader) -> Result<(), Errno> {
+    pub(crate) fn add_reader(&mut self, reader: &Reader) -> Result<(), EpollError> {
         epoll::add(
             &self.epollfd,
             reader,
             epoll::EventData::new_u64(reader.as_raw_fd() as u64),
             epoll::EventFlags::IN,
-        )
+        )?;
+        Ok(())
     }
 
-    pub(crate) fn add_writer(&mut self, writer: &Writer) -> Result<(), Errno> {
+    pub(crate) fn add_writer(&mut self, writer: &Writer) -> Result<(), EpollError> {
         epoll::add(
             &self.epollfd,
             writer,
             epoll::EventData::new_u64(writer.as_raw_fd() as u64),
             epoll::EventFlags::OUT,
-        )
+        )?;
+        Ok(())
     }
 
-    pub(crate) fn delete(&mut self, fd: &impl AsFd) -> Result<(), Errno> {
-        epoll::delete(&self.epollfd, fd)
+    pub(crate) fn delete(&mut self, fd: &impl AsFd) -> Result<(), EpollError> {
+        epoll::delete(&self.epollfd, fd)?;
+        Ok(())
     }
 
     pub(crate) fn wait(
@@ -55,7 +75,7 @@ impl Epoll {
         timeout: Option<&Timespec>,
         readers: &HashMap<i32, Reader>,
         writers: &HashMap<i32, Writer>,
-    ) -> Result<EpollResult, Errno> {
+    ) -> Result<EpollResult, EpollError> {
         log::trace!("epoll_wait()...");
         epoll::wait(&self.epollfd, spare_capacity(epoll_events), timeout)?;
         EpollResult::new(epoll_events, self.wl_fd, readers, writers)
@@ -93,7 +113,7 @@ impl EpollResult {
         wl_fd: i32,
         readers: &HashMap<i32, Reader>,
         writers: &HashMap<i32, Writer>,
-    ) -> Result<Self, Errno> {
+    ) -> Result<Self, EpollError> {
         let mut wl_is_readable = false;
         let mut readers_fd_set = FdSet::default();
         let mut writers_fd_set = FdSet::default();
@@ -104,7 +124,7 @@ impl EpollResult {
 
             if fd == wl_fd {
                 if revents.intersects(epoll::EventFlags::HUP | epoll::EventFlags::ERR) {
-                    return Err(Errno::CONNRESET);
+                    return Err(EpollError(Errno::CONNRESET));
                 } else if revents.contains(epoll::EventFlags::IN) {
                     wl_is_readable = true;
                 }

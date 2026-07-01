@@ -1,5 +1,4 @@
-use anyhow::{Context as _, Result};
-use rustix::{io::Errno, pipe::PipeFlags};
+use rustix::pipe::PipeFlags;
 use std::{
     collections::HashMap,
     os::fd::{AsFd, AsRawFd},
@@ -21,7 +20,7 @@ mod offer_seq;
 use offer_seq::OfferSeq;
 
 mod wl_event;
-use wl_event::WlEvent;
+use wl_event::{WlEvent, WlOfferEvent, WlRegistryEvent, WlSourceEvent};
 
 mod wl_state;
 use wl_state::WlState;
@@ -30,12 +29,7 @@ mod mime_types;
 use mime_types::MimeTypes;
 
 mod epoll;
-use epoll::Epoll;
-
-use crate::{
-    epoll::EpollResult,
-    wl_event::{WlOfferEvent, WlRegistryEvent, WlSourceEvent},
-};
+use epoll::{Epoll, EpollError, EpollResult};
 
 struct State {
     wl_seat: WlSeat,
@@ -63,7 +57,25 @@ enum ConnectError {
     WaylandDispatchError(wayland_client::DispatchError),
     NoSeat,
     Unsupported,
-    FailedToCreateEpoll(Errno),
+    EpollError(EpollError),
+}
+
+impl From<EpollError> for ConnectError {
+    fn from(err: EpollError) -> Self {
+        Self::EpollError(err)
+    }
+}
+
+impl From<wayland_client::ConnectError> for ConnectError {
+    fn from(err: wayland_client::ConnectError) -> Self {
+        Self::WaylandConnectError(err)
+    }
+}
+
+impl From<wayland_client::DispatchError> for ConnectError {
+    fn from(err: wayland_client::DispatchError) -> Self {
+        Self::WaylandDispatchError(err)
+    }
 }
 
 impl core::fmt::Display for ConnectError {
@@ -73,7 +85,7 @@ impl core::fmt::Display for ConnectError {
             Self::WaylandDispatchError(err) => write!(f, "WaylandDispatchError({err})"),
             Self::NoSeat => write!(f, "NoSeat"),
             Self::Unsupported => write!(f, "Unsupported"),
-            Self::FailedToCreateEpoll(err) => write!(f, "FailedToCreateEpoll({err})"),
+            Self::EpollError(err) => write!(f, "EpollError({err})"),
         }
     }
 }
@@ -82,14 +94,12 @@ impl core::error::Error for ConnectError {}
 
 impl State {
     fn connect() -> Result<Self, ConnectError> {
-        let conn = Connection::connect_to_env().map_err(ConnectError::WaylandConnectError)?;
+        let conn = Connection::connect_to_env()?;
         let mut wl = WlState::new();
         let mut queue = conn.new_event_queue::<WlState>();
 
         let registry = conn.display().get_registry(&queue.handle(), ());
-        queue
-            .roundtrip(&mut wl)
-            .map_err(ConnectError::WaylandDispatchError)?;
+        queue.roundtrip(&mut wl)?;
 
         let mut wl_seat: Option<WlSeat> = None;
         let mut ext_data_control_manager: Option<ExtDataControlManagerV1> = None;
@@ -119,7 +129,7 @@ impl State {
             ext_data_control_device,
 
             running: true,
-            epoll: Epoll::new(&conn).map_err(ConnectError::FailedToCreateEpoll)?,
+            epoll: Epoll::new(&conn)?,
 
             wl,
             queue,
@@ -133,7 +143,7 @@ impl State {
         })
     }
 
-    fn handle(&mut self, event: WlEvent) -> Result<()> {
+    fn handle(&mut self, event: WlEvent) -> Result<(), EpollError> {
         match event {
             WlEvent::Offer(event) => self.handle_offer_event(event)?,
             WlEvent::Source(event) => self.handle_source_event(event)?,
@@ -142,7 +152,7 @@ impl State {
         Ok(())
     }
 
-    fn handle_offer_event(&mut self, event: WlOfferEvent) -> Result<()> {
+    fn handle_offer_event(&mut self, event: WlOfferEvent) -> Result<(), EpollError> {
         match event {
             WlOfferEvent::DataOffer(offer) => {
                 self.offer_seq.start(offer);
@@ -193,7 +203,7 @@ impl State {
         Ok(())
     }
 
-    fn handle_source_event(&mut self, event: WlSourceEvent) -> Result<()> {
+    fn handle_source_event(&mut self, event: WlSourceEvent) -> Result<(), EpollError> {
         match event {
             WlSourceEvent::Requested(source, mime_type, fd) => {
                 if !MimeTypes::is_text(&mime_type) {
@@ -234,14 +244,14 @@ impl State {
         }
     }
 
-    fn add_reader(&mut self, reader: Reader) -> Result<()> {
+    fn add_reader(&mut self, reader: Reader) -> Result<(), EpollError> {
         log::trace!("new reader {:?}", reader.as_raw_fd());
         self.epoll.add_reader(&reader)?;
         self.readers.insert(reader.as_raw_fd(), reader);
         Ok(())
     }
 
-    fn remove_reader(&mut self, fd: i32) -> Result<()> {
+    fn remove_reader(&mut self, fd: i32) -> Result<(), EpollError> {
         let Some(reader) = self.readers.remove(&fd) else {
             return Ok(());
         };
@@ -250,14 +260,14 @@ impl State {
         Ok(())
     }
 
-    fn add_writer(&mut self, writer: Writer) -> Result<()> {
+    fn add_writer(&mut self, writer: Writer) -> Result<(), EpollError> {
         log::trace!("new writer {:?}", writer.as_raw_fd());
         self.epoll.add_writer(&writer)?;
         self.writers.insert(writer.as_raw_fd(), writer);
         Ok(())
     }
 
-    fn remove_writer(&mut self, fd: i32) -> Result<()> {
+    fn remove_writer(&mut self, fd: i32) -> Result<(), EpollError> {
         let Some(writer) = self.writers.remove(&fd) else {
             return Ok(());
         };
@@ -266,7 +276,7 @@ impl State {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let mut state = State::connect()?;
@@ -291,7 +301,7 @@ fn main() -> Result<()> {
         let wl_read_guard = state
             .queue
             .prepare_read()
-            .context("failed to create ReadEventsGuard")?;
+            .expect("failed to create ReadEventsGuard");
 
         let EpollResult {
             wl_is_readable,

@@ -1,13 +1,17 @@
 use crate::{reader::Reader, writer::Writer};
-use rustix::{buffer::spare_capacity, event::epoll, fs::Timespec, io::Errno};
+use rustix::{
+    buffer::spare_capacity,
+    event::epoll::{self, EventFlags},
+    fs::Timespec,
+    io::Errno,
+};
 use std::{
     collections::HashMap,
-    os::fd::{AsFd, AsRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
 };
 
 pub(crate) struct Epoll {
     epollfd: OwnedFd,
-    wl_fd: i32,
 }
 
 #[derive(Debug)]
@@ -28,43 +32,32 @@ impl core::fmt::Display for EpollError {
 impl core::error::Error for EpollError {}
 
 impl Epoll {
-    pub(crate) fn new(wl_fd: &impl AsFd) -> Result<Self, EpollError> {
+    pub(crate) fn new(wl_fd: BorrowedFd<'_>) -> Result<Self, EpollError> {
         let epollfd = epoll::create(epoll::CreateFlags::CLOEXEC)?;
+        let mut this = Self { epollfd };
+        this.add(wl_fd, EventFlags::IN)?;
+        Ok(this)
+    }
 
+    fn add(&mut self, fd: BorrowedFd<'_>, flags: EventFlags) -> Result<(), EpollError> {
         epoll::add(
-            &epollfd,
-            wl_fd,
-            epoll::EventData::new_u64(wl_fd.as_fd().as_raw_fd() as u64),
-            epoll::EventFlags::IN,
+            &self.epollfd,
+            fd,
+            epoll::EventData::new_u64(fd.as_fd().as_raw_fd() as u64),
+            flags,
         )?;
-
-        Ok(Self {
-            epollfd,
-            wl_fd: wl_fd.as_fd().as_raw_fd(),
-        })
+        Ok(())
     }
 
     pub(crate) fn add_reader(&mut self, reader: &Reader) -> Result<(), EpollError> {
-        epoll::add(
-            &self.epollfd,
-            reader,
-            epoll::EventData::new_u64(reader.as_raw_fd() as u64),
-            epoll::EventFlags::IN,
-        )?;
-        Ok(())
+        self.add(reader.as_fd(), EventFlags::IN)
     }
 
     pub(crate) fn add_writer(&mut self, writer: &Writer) -> Result<(), EpollError> {
-        epoll::add(
-            &self.epollfd,
-            writer,
-            epoll::EventData::new_u64(writer.as_raw_fd() as u64),
-            epoll::EventFlags::OUT,
-        )?;
-        Ok(())
+        self.add(writer.as_fd(), EventFlags::OUT)
     }
 
-    pub(crate) fn delete(&mut self, fd: &impl AsFd) -> Result<(), EpollError> {
+    pub(crate) fn delete(&mut self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
         epoll::delete(&self.epollfd, fd)?;
         Ok(())
     }
@@ -73,12 +66,13 @@ impl Epoll {
         &mut self,
         epoll_events: &mut Vec<epoll::Event>,
         timeout: Option<&Timespec>,
+        wl_fd: BorrowedFd<'_>,
         readers: &HashMap<i32, Reader>,
         writers: &HashMap<i32, Writer>,
     ) -> Result<EpollResult, EpollError> {
         log::trace!("epoll_wait()...");
         epoll::wait(&self.epollfd, spare_capacity(epoll_events), timeout)?;
-        EpollResult::new(epoll_events, self.wl_fd, readers, writers)
+        EpollResult::new(epoll_events, wl_fd, readers, writers)
     }
 }
 
@@ -110,7 +104,7 @@ pub(crate) struct EpollResult {
 impl EpollResult {
     fn new(
         events: &[epoll::Event],
-        wl_fd: i32,
+        wl_fd: BorrowedFd<'_>,
         readers: &HashMap<i32, Reader>,
         writers: &HashMap<i32, Writer>,
     ) -> Result<Self, EpollError> {
@@ -122,7 +116,7 @@ impl EpollResult {
             let fd = event.data.u64() as i32;
             let revents: epoll::EventFlags = event.flags;
 
-            if fd == wl_fd {
+            if fd == wl_fd.as_raw_fd() {
                 if revents.intersects(epoll::EventFlags::HUP | epoll::EventFlags::ERR) {
                     return Err(EpollError(Errno::CONNRESET));
                 } else if revents.contains(epoll::EventFlags::IN) {

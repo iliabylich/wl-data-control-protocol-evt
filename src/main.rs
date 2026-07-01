@@ -72,7 +72,7 @@ impl State {
             ext_data_control_device,
 
             running: true,
-            epoll: Epoll::new(&conn)?,
+            epoll: Epoll::new(conn.as_fd())?,
             epoll_events: Vec::with_capacity(16),
 
             wl,
@@ -199,7 +199,7 @@ impl State {
         let Some(reader) = self.readers.remove(&fd) else {
             return Ok(());
         };
-        self.epoll.delete(&reader)?;
+        self.epoll.delete(reader.as_fd())?;
         reader.destroy();
         Ok(())
     }
@@ -215,7 +215,7 @@ impl State {
         let Some(writer) = self.writers.remove(&fd) else {
             return Ok(());
         };
-        self.epoll.delete(&writer)?;
+        self.epoll.delete(writer.as_fd())?;
         Ok(())
     }
 
@@ -244,16 +244,7 @@ impl State {
         } = epoll_result;
 
         if wl_is_readable {
-            let wl_read_guard = self
-                .queue
-                .prepare_read()
-                .expect("failed to create ReadEventsGuard");
-            wl_read_guard.read()?;
-            self.queue.dispatch_pending(&mut self.wl)?;
-
-            while let Some(event) = self.wl.events.pop_front() {
-                self.handle(event)?;
-            }
+            self.handle_wl_socket()?;
         }
 
         for fd in readers.dead {
@@ -265,43 +256,69 @@ impl State {
         }
 
         for fd in readers.ready {
-            if let Some(reader) = self.readers.get_mut(&fd) {
-                log::trace!("Reading {fd:?}");
-                match reader.read() {
-                    Ok(ReadResult::Done(text)) => {
-                        log::trace!("Got text {text:?}");
-                        self.remove_reader(fd)?;
-
-                        if text == "EXIT" {
-                            self.running = false;
-                        }
-                    }
-                    Ok(ReadResult::Pending) => {}
-                    Err(err) => {
-                        log::error!("reader {fd:?} returned error {err:?}");
-                        self.remove_reader(fd)?;
-                    }
-                }
-            }
+            self.handle_reader(fd)?;
         }
 
         for fd in writers.ready {
-            if let Some(writer) = self.writers.get_mut(&fd) {
-                log::trace!("Writing {fd:?}");
-                match writer.write() {
-                    Ok(WriteResult::Done) => {
-                        log::trace!("Done writing to {fd:?}");
-                        self.remove_writer(fd)?;
+            self.handle_writer(fd)?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_wl_socket(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let wl_read_guard = self
+            .queue
+            .prepare_read()
+            .expect("failed to create ReadEventsGuard");
+        wl_read_guard.read()?;
+        self.queue.dispatch_pending(&mut self.wl)?;
+
+        while let Some(event) = self.wl.events.pop_front() {
+            self.handle(event)?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_reader(&mut self, fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(reader) = self.readers.get_mut(&fd) {
+            log::trace!("Reading {fd:?}");
+            match reader.read() {
+                Ok(ReadResult::Done(text)) => {
+                    log::trace!("Got text {text:?}");
+                    self.remove_reader(fd)?;
+
+                    if text == "EXIT" {
+                        self.running = false;
                     }
-                    Ok(WriteResult::Pending) => {}
-                    Err(err) => {
-                        log::error!("writer {fd:?} returned error {err:?}");
-                        self.remove_writer(fd)?;
-                    }
+                }
+                Ok(ReadResult::Pending) => {}
+                Err(err) => {
+                    log::error!("reader {fd:?} returned error {err:?}");
+                    self.remove_reader(fd)?;
                 }
             }
         }
 
+        Ok(())
+    }
+
+    fn handle_writer(&mut self, fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(writer) = self.writers.get_mut(&fd) {
+            log::trace!("Writing {fd:?}");
+            match writer.write() {
+                Ok(WriteResult::Done) => {
+                    log::trace!("Done writing to {fd:?}");
+                    self.remove_writer(fd)?;
+                }
+                Ok(WriteResult::Pending) => {}
+                Err(err) => {
+                    log::error!("writer {fd:?} returned error {err:?}");
+                    self.remove_writer(fd)?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -313,18 +330,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.offer_text(String::from("BOO"))?;
 
     while state.running {
-        state.queue.flush()?;
-        state.queue.dispatch_pending(&mut state.wl)?;
-
         let epoll_result = state.epoll.wait(
             &mut state.epoll_events,
             None,
+            state._connection.as_fd(),
             &state.readers,
             &state.writers,
         )?;
         state.epoll_events.clear();
 
         state.handle_epoll_result(epoll_result)?;
+
+        state.queue.flush()?;
+        state.queue.dispatch_pending(&mut state.wl)?;
     }
 
     state.cleanup();

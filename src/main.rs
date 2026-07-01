@@ -27,17 +27,16 @@ mod epoll;
 use epoll::{Epoll, EpollError, EpollResult};
 
 mod connection;
-use connection::Connection;
+use connection::AppConnection;
 
 mod evented;
 
 struct State {
-    connection: Connection,
+    connection: AppConnection,
     epoll: Epoll,
     epoll_events: Vec<rustix::event::epoll::Event>,
     running: bool,
 
-    wl_events: WlEventsStream,
     readers: HashMap<i32, Reader>,
     writers: HashMap<i32, Writer>,
     mime_types: MimeTypes,
@@ -49,14 +48,13 @@ struct State {
 
 impl State {
     fn connect() -> Result<Self, Box<dyn std::error::Error>> {
-        let connection = Connection::connect()?;
+        let connection = AppConnection::connect()?;
 
         Ok(State {
             running: true,
             epoll: Epoll::new(connection.as_fd())?,
             epoll_events: Vec::with_capacity(16),
 
-            wl_events: WlEventsStream::new(),
             connection,
             readers: HashMap::new(),
             writers: HashMap::new(),
@@ -233,10 +231,7 @@ impl State {
     }
 
     fn handle_wl_socket(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        for event in self
-            .wl_events
-            .read_until_blocked(&mut self.connection.queue)?
-        {
+        for event in self.connection.read_until_blocked()? {
             self.handle(event)?;
         }
 
@@ -307,7 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state
             .connection
             .queue
-            .dispatch_pending(&mut state.wl_events)?;
+            .dispatch_pending(&mut WlEventsStream)?;
     }
 
     state.cleanup();

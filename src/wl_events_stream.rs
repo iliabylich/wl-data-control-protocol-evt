@@ -1,10 +1,10 @@
-use crate::wl_event::{WlEvent, WlRegistryEvent};
+use crate::{
+    connection::AppConnection,
+    wl_event::{WlEvent, WlRegistryEvent},
+};
 use crossbeam_queue::SegQueue;
-use std::sync::Arc;
 use wayland_client::{
-    Connection, Dispatch, DispatchError, EventQueue, Proxy, QueueHandle,
-    backend::WaylandError,
-    event_created_child,
+    Connection, Dispatch, Proxy, QueueHandle, event_created_child,
     protocol::{wl_registry::WlRegistry, wl_seat::WlSeat},
 };
 use wayland_protocols::ext::data_control::v1::client::{
@@ -14,83 +14,14 @@ use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_source_v1::ExtDataControlSourceV1,
 };
 
-pub(crate) struct WlEventsStream {
-    events: Vec<WlEvent>,
-}
+pub(crate) struct WlEventsStream;
 
-impl WlEventsStream {
-    pub(crate) fn new() -> Self {
-        Self { events: vec![] }
-    }
-
-    pub(crate) fn get_registry_and_registry_events_sync(
-        conn: &Connection,
-        queue: &mut EventQueue<Self>,
-    ) -> Result<(WlRegistry, Vec<WlRegistryEvent>), DispatchError> {
-        let buffer: Arc<SegQueue<WlRegistryEvent>> = Arc::new(SegQueue::new());
-        let registry = conn
-            .display()
-            .get_registry(&queue.handle(), Arc::clone(&buffer));
-        let mut this = Self { events: vec![] };
-        queue.roundtrip(&mut this)?;
-
-        let mut events = vec![];
-        while let Some(event) = buffer.pop() {
-            events.push(event);
-        }
-        Ok((registry, events))
-    }
-
-    pub(crate) fn read_until_blocked(
-        &mut self,
-        queue: &mut EventQueue<Self>,
-    ) -> Result<Vec<WlEvent>, WlEventStreamReadError> {
-        let wl_read_guard = queue
-            .prepare_read()
-            .expect("failed to create ReadEventsGuard");
-        wl_read_guard.read()?;
-        queue.dispatch_pending(self)?;
-
-        let events = core::mem::take(&mut self.events);
-        Ok(events)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum WlEventStreamReadError {
-    Wayland(WaylandError),
-    Dispatch(DispatchError),
-}
-
-impl core::fmt::Display for WlEventStreamReadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Wayland(err) => write!(f, "Wayland({err})"),
-            Self::Dispatch(err) => write!(f, "Dispatch({err})"),
-        }
-    }
-}
-
-impl core::error::Error for WlEventStreamReadError {}
-
-impl From<WaylandError> for WlEventStreamReadError {
-    fn from(err: WaylandError) -> Self {
-        Self::Wayland(err)
-    }
-}
-
-impl From<DispatchError> for WlEventStreamReadError {
-    fn from(err: DispatchError) -> Self {
-        Self::Dispatch(err)
-    }
-}
-
-impl Dispatch<WlRegistry, Arc<SegQueue<WlRegistryEvent>>> for WlEventsStream {
+impl Dispatch<WlRegistry, &SegQueue<WlRegistryEvent>> for WlEventsStream {
     fn event(
         _state: &mut Self,
         _registry: &WlRegistry,
         event: <WlRegistry as Proxy>::Event,
-        events: &Arc<SegQueue<WlRegistryEvent>>,
+        events: &&SegQueue<WlRegistryEvent>,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
@@ -128,12 +59,12 @@ impl Dispatch<ExtDataControlManagerV1, ()> for WlEventsStream {
     }
 }
 
-impl Dispatch<ExtDataControlDeviceV1, ()> for WlEventsStream {
+impl Dispatch<ExtDataControlDeviceV1, &SegQueue<WlEvent>> for WlEventsStream {
     fn event(
-        Self { events }: &mut Self,
+        _state: &mut Self,
         _proxy: &ExtDataControlDeviceV1,
         event: <ExtDataControlDeviceV1 as Proxy>::Event,
-        _data: &(),
+        events: &&SegQueue<WlEvent>,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
@@ -150,18 +81,18 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WlEventsStream {
         ExtDataControlDeviceV1, [
             ext_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (
                 ExtDataControlOfferV1,
-                ()
+                AppConnection::wl_events_queue()
             )
         ]
     );
 }
 
-impl Dispatch<ExtDataControlOfferV1, ()> for WlEventsStream {
+impl Dispatch<ExtDataControlOfferV1, &SegQueue<WlEvent>> for WlEventsStream {
     fn event(
-        Self { events }: &mut Self,
+        _state: &mut Self,
         proxy: &ExtDataControlOfferV1,
         event: <ExtDataControlOfferV1 as Proxy>::Event,
-        _data: &(),
+        events: &&SegQueue<WlEvent>,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
@@ -175,12 +106,12 @@ impl Dispatch<ExtDataControlOfferV1, ()> for WlEventsStream {
     }
 }
 
-impl Dispatch<ExtDataControlSourceV1, ()> for WlEventsStream {
+impl Dispatch<ExtDataControlSourceV1, &SegQueue<WlEvent>> for WlEventsStream {
     fn event(
-        Self { events }: &mut Self,
+        _self: &mut Self,
         proxy: &ExtDataControlSourceV1,
         event: <ExtDataControlSourceV1 as Proxy>::Event,
-        _data: &(),
+        events: &&SegQueue<WlEvent>,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {

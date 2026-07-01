@@ -274,23 +274,27 @@ impl State {
         self.epoll.delete(&writer)?;
         Ok(())
     }
+
+    fn offer_text(&mut self, text: String) -> Result<(), wayland_client::backend::WaylandError> {
+        let source = self
+            .ext_data_control_manager
+            .create_data_source(&self.queue.handle(), ());
+        source.offer("text/plain;charset=utf-8".to_string());
+        source.offer("text/plain".to_string());
+        source.offer(self.mime_types.mask().to_string());
+
+        self.ext_data_control_device.set_selection(Some(&source));
+        self.source_to_text.insert(source, text);
+        self.queue.flush()?;
+        Ok(())
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let mut state = State::connect()?;
-
-    let source = state
-        .ext_data_control_manager
-        .create_data_source(&state.queue.handle(), ());
-    source.offer("text/plain;charset=utf-8".to_string());
-    source.offer("text/plain".to_string());
-    source.offer(state.mime_types.mask().to_string());
-
-    state.ext_data_control_device.set_selection(Some(&source));
-    state.source_to_text.insert(source, String::from("FOO"));
-    state.queue.flush()?;
+    state.offer_text(String::from("BOO"))?;
 
     let mut epoll_events = Vec::with_capacity(16);
 

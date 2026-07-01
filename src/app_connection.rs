@@ -1,13 +1,11 @@
 use crate::{
+    errors::{ExtDataControlReadError, ExtDataControlConnectError},
     wl_event::{WlEvent, WlRegistryEvent},
     wl_events_stream::WlEventsStream,
 };
 use crossbeam_queue::SegQueue;
 use std::os::fd::{AsFd, AsRawFd};
-use wayland_client::{
-    ConnectError, Connection, DispatchError, EventQueue, backend::WaylandError,
-    protocol::wl_seat::WlSeat,
-};
+use wayland_client::{Connection, EventQueue, backend::WaylandError, protocol::wl_seat::WlSeat};
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_device_v1::ExtDataControlDeviceV1,
     ext_data_control_manager_v1::ExtDataControlManagerV1,
@@ -27,12 +25,12 @@ pub(crate) struct AppConnection {
 }
 
 impl AppConnection {
-    pub(crate) fn connect() -> Result<Self, ConnectorError> {
+    pub(crate) fn connect() -> Result<Self, ExtDataControlConnectError> {
         let conn = Connection::connect_to_env()?;
         let mut queue = conn.new_event_queue::<WlEventsStream>();
         let (wl_seat, ext_data_control_manager, ext_data_control_device) =
             get_startup_objects(&conn, &mut queue)?;
-        queue.flush().unwrap();
+        queue.flush()?;
 
         Ok(Self {
             conn,
@@ -44,11 +42,11 @@ impl AppConnection {
         })
     }
 
-    pub(crate) fn read_until_blocked(&mut self) -> Result<Vec<WlEvent>, ReadError> {
+    pub(crate) fn read_until_blocked(&mut self) -> Result<Vec<WlEvent>, ExtDataControlReadError> {
         let wl_read_guard = self
             .queue
             .prepare_read()
-            .ok_or(ReadError::FailedToCreateReadGuard)?;
+            .ok_or(ExtDataControlReadError::FailedToCreateReadGuard)?;
         wl_read_guard.read()?;
         self.queue.dispatch_pending(&mut WlEventsStream)?;
 
@@ -106,7 +104,7 @@ impl AsRawFd for AppConnection {
 pub(crate) fn get_startup_objects(
     conn: &Connection,
     queue: &mut EventQueue<WlEventsStream>,
-) -> Result<(WlSeat, ExtDataControlManagerV1, ExtDataControlDeviceV1), ConnectorError> {
+) -> Result<(WlSeat, ExtDataControlManagerV1, ExtDataControlDeviceV1), ExtDataControlConnectError> {
     let registry = conn
         .display()
         .get_registry(&queue.handle(), &WL_REGISTRY_EVENTS_QUEUE);
@@ -127,77 +125,12 @@ pub(crate) fn get_startup_objects(
         }
     }
 
-    let wl_seat = wl_seat.ok_or(ConnectorError::NoSeat)?;
-    let ext_data_control_manager = ext_data_control_manager.ok_or(ConnectorError::Unsupported)?;
+    let wl_seat = wl_seat.ok_or(ExtDataControlConnectError::NoSeat)?;
+    let ext_data_control_manager =
+        ext_data_control_manager.ok_or(ExtDataControlConnectError::Unsupported)?;
 
     let ext_data_control_device =
         ext_data_control_manager.get_data_device(&wl_seat, &queue.handle(), &WL_EVENTS_QUEUE);
 
     Ok((wl_seat, ext_data_control_manager, ext_data_control_device))
-}
-
-#[derive(Debug)]
-pub(crate) enum ConnectorError {
-    WaylandConnectFailed(ConnectError),
-    WaylandDispatchFailed(DispatchError),
-    NoSeat,
-    Unsupported,
-}
-
-impl From<ConnectError> for ConnectorError {
-    fn from(err: ConnectError) -> Self {
-        Self::WaylandConnectFailed(err)
-    }
-}
-
-impl From<DispatchError> for ConnectorError {
-    fn from(err: DispatchError) -> Self {
-        Self::WaylandDispatchFailed(err)
-    }
-}
-
-impl core::fmt::Display for ConnectorError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::WaylandConnectFailed(err) => write!(f, "WaylandConnectError({err})"),
-            Self::WaylandDispatchFailed(err) => write!(f, "WaylandDispatchError({err})"),
-            Self::NoSeat => write!(f, "NoSeat"),
-            Self::Unsupported => write!(f, "Unsupported"),
-        }
-    }
-}
-
-impl core::error::Error for ConnectorError {}
-
-//
-
-#[derive(Debug)]
-pub(crate) enum ReadError {
-    Wayland(WaylandError),
-    Dispatch(DispatchError),
-    FailedToCreateReadGuard,
-}
-
-impl core::fmt::Display for ReadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Wayland(err) => write!(f, "Wayland({err})"),
-            Self::Dispatch(err) => write!(f, "Dispatch({err})"),
-            Self::FailedToCreateReadGuard => write!(f, "FailedToCreateReadGuard"),
-        }
-    }
-}
-
-impl core::error::Error for ReadError {}
-
-impl From<WaylandError> for ReadError {
-    fn from(err: WaylandError) -> Self {
-        Self::Wayland(err)
-    }
-}
-
-impl From<DispatchError> for ReadError {
-    fn from(err: DispatchError) -> Self {
-        Self::Dispatch(err)
-    }
 }

@@ -22,8 +22,8 @@ impl OfferSeq {
     pub(crate) fn extend(&mut self, mime_offer: ExtDataControlOfferV1, mime_type: String) {
         match std::mem::take(self) {
             Self::Empty => {
-                log::error!("Wrong sequence of events");
-                log::error!("Got mime type on Empty sequence");
+                log::error!("wrong sequence of events");
+                log::error!("got mime type on Empty sequence");
                 mime_offer.destroy();
             }
             Self::Started {
@@ -34,8 +34,8 @@ impl OfferSeq {
                     mime_types.insert(mime_type);
                     *self = Self::Started { offer, mime_types };
                 } else {
-                    log::error!("Wrong sequence of events");
-                    log::error!("Got mime type for different offer");
+                    log::error!("wrong sequence of events");
+                    log::error!("got mime type for different offer");
                     offer.destroy();
                     mime_offer.destroy();
                     *self = Self::Empty;
@@ -50,8 +50,8 @@ impl OfferSeq {
     ) -> Option<(ExtDataControlOfferV1, HashSet<String>)> {
         match std::mem::take(self) {
             OfferSeq::Empty => {
-                log::error!("Wrong sequence of events");
-                log::error!("Can't finish Empty sequence");
+                log::error!("wrong sequence of events");
+                log::error!("can't finish Empty sequence");
                 finish_offer.destroy();
                 None
             }
@@ -59,8 +59,8 @@ impl OfferSeq {
                 if offer == finish_offer {
                     Some((offer, mime_types))
                 } else {
-                    log::error!("Wrong sequence of events");
-                    log::error!("Got finish event for different offer");
+                    log::error!("wrong sequence of events");
+                    log::error!("got finish event for different offer");
                     offer.destroy();
                     finish_offer.destroy();
                     *self = Self::Empty;

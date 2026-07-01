@@ -14,7 +14,7 @@ pub(crate) struct Epoll {
 }
 
 #[derive(Debug)]
-pub(crate) struct EpollError(Errno);
+pub struct EpollError(Errno);
 
 impl From<Errno> for EpollError {
     fn from(errno: Errno) -> Self {
@@ -69,7 +69,6 @@ impl Epoll {
         readers: &HashMap<i32, R>,
         writers: &HashMap<i32, W>,
     ) -> Result<EpollResult, EpollError> {
-        log::trace!("epoll_wait()...");
         epoll::wait(&self.epollfd, spare_capacity(epoll_events), timeout)?;
         EpollResult::new(epoll_events, wl_fd, readers, writers)
     }
@@ -123,14 +122,14 @@ impl EpollResult {
                 }
             } else if readers.contains_key(&fd) {
                 if revents.intersects(epoll::EventFlags::ERR) {
-                    log::error!("Reader with FD {fd} returned revents {revents:?}, removing it");
+                    log::error!("reader with FD {fd} returned revents {revents:?}, removing it");
                     readers_fd_set.dead.push(fd);
                 } else if revents.intersects(epoll::EventFlags::IN | epoll::EventFlags::HUP) {
                     readers_fd_set.ready.push(fd);
                 }
             } else if writers.contains_key(&fd) {
                 if revents.intersects(epoll::EventFlags::ERR | epoll::EventFlags::HUP) {
-                    log::error!("Writer with FD {fd} returned revents {revents:?}, removing it");
+                    log::error!("writer with FD {fd} returned revents {revents:?}, removing it");
                     writers_fd_set.dead.push(fd);
                 } else if revents.contains(epoll::EventFlags::OUT) {
                     writers_fd_set.ready.push(fd);

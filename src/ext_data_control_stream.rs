@@ -1,6 +1,5 @@
-use rustix::fs::Timespec;
-
 use crate::{
+    ExtDataControlConnectError, ExtDataControlReadError,
     app_connection::AppConnection,
     epoll::{Epoll, EpollError, EpollResult},
     reader::{ReadResult, Reader},
@@ -8,12 +7,14 @@ use crate::{
     wl_events_stream::WlEventsStream,
     writer::{WriteResult, Writer},
 };
+use rustix::fs::Timespec;
 use std::{
     collections::HashMap,
     os::fd::{AsFd, AsRawFd},
 };
+use wayland_client::backend::WaylandError;
 
-pub(crate) struct ExtDataControlStream {
+pub struct ExtDataControlStream {
     connection: AppConnection,
     rw_stream: ReaderWriterStream,
 
@@ -25,7 +26,7 @@ pub(crate) struct ExtDataControlStream {
 }
 
 impl ExtDataControlStream {
-    pub(crate) fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new() -> Result<Self, ExtDataControlConnectError> {
         let connection = AppConnection::connect()?;
         let epoll = Epoll::new(connection.as_fd())?;
 
@@ -41,7 +42,7 @@ impl ExtDataControlStream {
         })
     }
 
-    pub(crate) fn cleanup(&mut self) {
+    pub fn cleanup(&mut self) {
         for reader in self.readers.values() {
             reader.destroy();
         }
@@ -66,10 +67,7 @@ impl ExtDataControlStream {
         Ok(())
     }
 
-    pub(crate) fn offer_text(
-        &mut self,
-        text: impl Into<String>,
-    ) -> Result<(), wayland_client::backend::WaylandError> {
+    pub fn offer_text(&mut self, text: impl Into<String>) -> Result<(), WaylandError> {
         let source = self
             .connection
             .offer_text(self.rw_stream.mime_type_mask())?;
@@ -81,7 +79,7 @@ impl ExtDataControlStream {
         &mut self,
         epoll_result: EpollResult,
         events: &mut Vec<ExtDataControlEvent>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ExtDataControlReadError> {
         let EpollResult {
             wl_is_readable,
             readers,
@@ -114,16 +112,14 @@ impl ExtDataControlStream {
     fn read_from_wl_socket_until_blocked(
         &mut self,
         events: &mut Vec<ExtDataControlEvent>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ExtDataControlReadError> {
         for event in self.rw_stream.read_until_blocked(&mut self.connection)? {
             match event {
                 ReaderWriterEvent::NewReader(reader) => {
-                    log::trace!("new reader {:?}", reader.as_raw_fd());
                     self.epoll.register_readable(reader.as_fd())?;
-                    self.readers.insert(reader.as_raw_fd(), reader);
+                    self.readers.insert(reader.as_raw_fd(), *reader);
                 }
                 ReaderWriterEvent::NewWriter(writer) => {
-                    log::trace!("new writer {:?}", writer.as_raw_fd());
                     self.epoll.register_writable(writer.as_fd())?;
                     self.writers.insert(writer.as_raw_fd(), writer);
                 }
@@ -138,12 +134,10 @@ impl ExtDataControlStream {
         &mut self,
         fd: i32,
         events: &mut Vec<ExtDataControlEvent>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ExtDataControlReadError> {
         if let Some(reader) = self.readers.get_mut(&fd) {
-            log::trace!("Reading {fd:?}");
             match reader.read() {
                 Ok(ReadResult::Done(text)) => {
-                    log::trace!("Got text {text:?}");
                     self.remove_reader(fd)?;
                     events.push(ExtDataControlEvent::Received(text));
                 }
@@ -158,12 +152,10 @@ impl ExtDataControlStream {
         Ok(())
     }
 
-    fn write_source(&mut self, fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+    fn write_source(&mut self, fd: i32) -> Result<(), ExtDataControlReadError> {
         if let Some(writer) = self.writers.get_mut(&fd) {
-            log::trace!("Writing {fd:?}");
             match writer.write() {
                 Ok(WriteResult::Done) => {
-                    log::trace!("Done writing to {fd:?}");
                     self.remove_writer(fd)?;
                 }
                 Ok(WriteResult::Pending) => {}
@@ -176,7 +168,7 @@ impl ExtDataControlStream {
         Ok(())
     }
 
-    pub(crate) fn read(&mut self) -> Result<Vec<ExtDataControlEvent>, Box<dyn std::error::Error>> {
+    pub fn read(&mut self) -> Result<Vec<ExtDataControlEvent>, ExtDataControlReadError> {
         let epoll_result = self.epoll.wait(
             &mut self.epoll_events,
             Some(&Timespec {
@@ -214,7 +206,7 @@ impl AsRawFd for ExtDataControlStream {
 }
 
 #[derive(Debug)]
-pub(crate) enum ExtDataControlEvent {
+pub enum ExtDataControlEvent {
     Received(String),
     Finished,
 }

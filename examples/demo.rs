@@ -1,15 +1,4 @@
-mod app_connection;
-mod epoll;
-mod ext_data_control_stream;
-mod mime_types;
-mod offer_seq;
-mod reader;
-mod rw_stream;
-mod wl_event;
-mod wl_events_stream;
-mod writer;
-
-use ext_data_control_stream::{ExtDataControlEvent, ExtDataControlStream};
+use anyhow::{Context, Result, bail};
 use rustix::{
     event::{PollFd, PollFlags, poll},
     fs::Timespec,
@@ -18,27 +7,14 @@ use rustix::{
         timerfd_settime,
     },
 };
+use std::os::fd::OwnedFd;
+use wl_data_control_protocol_evt::{ExtDataControlEvent, ExtDataControlStream};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     env_logger::init();
 
-    let timerfd = timerfd_create(TimerfdClockId::Monotonic, TimerfdFlags::NONBLOCK)?;
-    timerfd_settime(
-        &timerfd,
-        TimerfdTimerFlags::ABSTIME,
-        &Itimerspec {
-            it_interval: Timespec {
-                tv_sec: 1,
-                tv_nsec: 0,
-            },
-            it_value: Timespec {
-                tv_sec: 1,
-                tv_nsec: 0,
-            },
-        },
-    )?;
-
-    let mut state = ExtDataControlStream::new()?;
+    let timerfd = create_timer()?;
+    let mut state = ExtDataControlStream::new().context("failed to create ExtDataControlStream")?;
     let mut tick = 5;
 
     'outer: loop {
@@ -46,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             PollFd::new(&timerfd, PollFlags::IN),
             PollFd::new(&state, PollFlags::IN),
         ];
-        poll(&mut pollfds, None)?;
+        poll(&mut pollfds, None).context("poll() failed")?;
         let revents = [pollfds[0].revents(), pollfds[1].revents()];
 
         //
@@ -62,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state.offer_text(format!("text{tick}"))?;
                 }
             }
-            Some(REvents::Err) => panic!("timer returned err"),
+            Some(REvents::Err) => bail!("timer returned err"),
             None => {}
         }
 
@@ -80,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            Some(REvents::Err) => panic!("crate returned err"),
+            Some(REvents::Err) => bail!("crate returned err"),
             None => {}
         }
     }
@@ -90,10 +66,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn create_timer() -> Result<OwnedFd> {
+    let timerfd = timerfd_create(TimerfdClockId::Monotonic, TimerfdFlags::NONBLOCK)
+        .context("timerfd_create() failed")?;
+    timerfd_settime(
+        &timerfd,
+        TimerfdTimerFlags::ABSTIME,
+        &Itimerspec {
+            it_interval: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
+        },
+    )
+    .context("timerfd_settime() failed")?;
+    Ok(timerfd)
+}
+
 enum REvents {
     Readable,
     Err,
 }
+
 impl REvents {
     fn new(revents: PollFlags) -> Option<Self> {
         if revents.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL) {

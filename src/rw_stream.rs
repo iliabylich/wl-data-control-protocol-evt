@@ -1,5 +1,6 @@
 use crate::{
-    app_connection::{AppConnection, ReadError},
+    ExtDataControlReadError,
+    app_connection::AppConnection,
     mime_types::MimeTypes,
     offer_seq::OfferSeq,
     reader::Reader,
@@ -28,7 +29,7 @@ impl ReaderWriterStream {
     pub(crate) fn read_until_blocked(
         &mut self,
         conn: &mut AppConnection,
-    ) -> Result<Vec<ReaderWriterEvent>, ReadError> {
+    ) -> Result<Vec<ReaderWriterEvent>, ExtDataControlReadError> {
         let mut events = vec![];
         for event in conn.read_until_blocked()? {
             if let Some(event) = self.map_any(event) {
@@ -86,7 +87,9 @@ impl ReaderWriterStream {
                     Ok((reader, writer)) => {
                         offer.receive(mime_type_to_ask_for, writer.as_fd());
                         drop(writer);
-                        return Some(ReaderWriterEvent::NewReader(Reader::new(reader, offer)));
+                        return Some(ReaderWriterEvent::NewReader(Box::new(Reader::new(
+                            reader, offer,
+                        ))));
                     }
                     Err(err) => {
                         log::error!("failed to create pipe: {err:?}");
@@ -125,7 +128,7 @@ impl ReaderWriterStream {
                 match Writer::new(fd, text.clone()) {
                     Ok(writer) => Some(ReaderWriterEvent::NewWriter(writer)),
                     Err(err) => {
-                        log::error!("{err:?}");
+                        log::error!("filed to create a writer: {err:?}");
                         None
                     }
                 }
@@ -140,7 +143,7 @@ impl ReaderWriterStream {
 }
 
 pub(crate) enum ReaderWriterEvent {
-    NewReader(Reader),
+    NewReader(Box<Reader>),
     NewWriter(Writer),
     Finished,
 }

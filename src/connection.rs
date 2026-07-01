@@ -1,15 +1,16 @@
 use crate::{wl_event::WlRegistryEvent, wl_events_stream::WlEventsStream};
-use wayland_client::{Connection, EventQueue, protocol::wl_seat::WlSeat};
+use std::os::fd::{AsFd, AsRawFd};
+use wayland_client::{
+    Connection as WlConnection, EventQueue, backend::WaylandError, protocol::wl_seat::WlSeat,
+};
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_device_v1::ExtDataControlDeviceV1,
     ext_data_control_manager_v1::ExtDataControlManagerV1,
+    ext_data_control_source_v1::ExtDataControlSourceV1,
 };
 
-pub(crate) struct Connector;
-
-pub(crate) struct ConnectorOutput {
-    pub(crate) conn: Connection,
-    pub(crate) wl_events: WlEventsStream,
+pub(crate) struct Connection {
+    pub(crate) conn: WlConnection,
     pub(crate) queue: EventQueue<WlEventsStream>,
 
     pub(crate) wl_seat: WlSeat,
@@ -17,18 +18,16 @@ pub(crate) struct ConnectorOutput {
     pub(crate) ext_data_control_device: ExtDataControlDeviceV1,
 }
 
-impl Connector {
-    pub(crate) fn connect() -> Result<ConnectorOutput, ConnectorError> {
-        let conn = Connection::connect_to_env()?;
+impl Connection {
+    pub(crate) fn connect() -> Result<Self, ConnectorError> {
+        let conn = WlConnection::connect_to_env()?;
         let mut queue = conn.new_event_queue::<WlEventsStream>();
-        let mut wl_events = WlEventsStream::new();
 
         let (wl_seat, ext_data_control_manager, ext_data_control_device) =
-            get_objects(&conn, &mut queue, &mut wl_events)?;
+            get_objects(&conn, &mut queue)?;
 
-        Ok(ConnectorOutput {
+        Ok(Self {
             conn,
-            wl_events,
             queue,
 
             wl_seat,
@@ -36,14 +35,51 @@ impl Connector {
             ext_data_control_device,
         })
     }
+
+    pub(crate) fn cleanup_and_flush(&self) {
+        self.ext_data_control_device.destroy();
+        self.wl_seat.release();
+        self.ext_data_control_manager.destroy();
+
+        if let Err(err) = self.queue.flush() {
+            log::error!("failed to finish cleanup: {err:?}");
+        }
+    }
+
+    pub(crate) fn offer_text(
+        &self,
+        custom_mime_type: impl Into<String>,
+    ) -> Result<ExtDataControlSourceV1, WaylandError> {
+        let source = self
+            .ext_data_control_manager
+            .create_data_source(&self.queue.handle(), ());
+        source.offer("text/plain;charset=utf-8".to_string());
+        source.offer("text/plain".to_string());
+        source.offer(custom_mime_type.into());
+
+        self.ext_data_control_device.set_selection(Some(&source));
+        self.queue.flush()?;
+        Ok(source)
+    }
+}
+
+impl AsFd for Connection {
+    fn as_fd(&self) -> std::os::unix::prelude::BorrowedFd<'_> {
+        self.conn.as_fd()
+    }
+}
+
+impl AsRawFd for Connection {
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+        self.conn.as_fd().as_raw_fd()
+    }
 }
 
 pub(crate) fn get_objects(
-    conn: &Connection,
+    conn: &WlConnection,
     queue: &mut EventQueue<WlEventsStream>,
-    wl_events: &mut WlEventsStream,
 ) -> Result<(WlSeat, ExtDataControlManagerV1, ExtDataControlDeviceV1), ConnectorError> {
-    let (registry, events) = wl_events.get_registry_and_registry_events_sync(conn, queue)?;
+    let (registry, events) = WlEventsStream::get_registry_and_registry_events_sync(conn, queue)?;
 
     let mut wl_seat: Option<WlSeat> = None;
     let mut ext_data_control_manager: Option<ExtDataControlManagerV1> = None;

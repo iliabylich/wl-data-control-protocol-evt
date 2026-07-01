@@ -3,12 +3,7 @@ use std::{
     collections::HashMap,
     os::fd::{AsFd, AsRawFd},
 };
-use wayland_client::{Connection, EventQueue, protocol::wl_seat::WlSeat};
-use wayland_protocols::ext::data_control::v1::client::{
-    ext_data_control_device_v1::ExtDataControlDeviceV1,
-    ext_data_control_manager_v1::ExtDataControlManagerV1,
-    ext_data_control_source_v1::ExtDataControlSourceV1,
-};
+use wayland_protocols::ext::data_control::v1::client::ext_data_control_source_v1::ExtDataControlSourceV1;
 
 mod reader;
 use reader::{ReadResult, Reader};
@@ -31,22 +26,17 @@ use mime_types::MimeTypes;
 mod epoll;
 use epoll::{Epoll, EpollError, EpollResult};
 
-mod connector;
-use connector::{Connector, ConnectorOutput};
+mod connection;
+use connection::Connection;
 
 mod evented;
 
 struct State {
-    wl_seat: WlSeat,
-    ext_data_control_manager: ExtDataControlManagerV1,
-    ext_data_control_device: ExtDataControlDeviceV1,
-
+    connection: Connection,
     epoll: Epoll,
     epoll_events: Vec<rustix::event::epoll::Event>,
     running: bool,
 
-    _connection: Connection,
-    queue: EventQueue<WlEventsStream>,
     wl_events: WlEventsStream,
     readers: HashMap<i32, Reader>,
     writers: HashMap<i32, Writer>,
@@ -59,27 +49,15 @@ struct State {
 
 impl State {
     fn connect() -> Result<Self, Box<dyn std::error::Error>> {
-        let ConnectorOutput {
-            conn,
-            wl_events,
-            queue,
-            wl_seat,
-            ext_data_control_manager,
-            ext_data_control_device,
-        } = Connector::connect()?;
+        let connection = Connection::connect()?;
 
         Ok(State {
-            wl_seat,
-            ext_data_control_manager,
-            ext_data_control_device,
-
             running: true,
-            epoll: Epoll::new(conn.as_fd())?,
+            epoll: Epoll::new(connection.as_fd())?,
             epoll_events: Vec::with_capacity(16),
 
-            wl_events,
-            queue,
-            _connection: conn,
+            wl_events: WlEventsStream::new(),
+            connection,
             readers: HashMap::new(),
             writers: HashMap::new(),
             mime_types: MimeTypes::new(),
@@ -173,10 +151,6 @@ impl State {
     }
 
     fn cleanup(&mut self) {
-        self.ext_data_control_device.destroy();
-        self.wl_seat.release();
-        self.ext_data_control_manager.destroy();
-
         for reader in self.readers.values() {
             reader.destroy();
         }
@@ -185,9 +159,7 @@ impl State {
             source.destroy()
         }
 
-        if let Err(err) = self.queue.flush() {
-            log::error!("failed to finish cleanup: {err:?}");
-        }
+        self.connection.cleanup_and_flush();
     }
 
     fn add_reader(&mut self, reader: Reader) -> Result<(), EpollError> {
@@ -222,16 +194,8 @@ impl State {
     }
 
     fn offer_text(&mut self, text: String) -> Result<(), wayland_client::backend::WaylandError> {
-        let source = self
-            .ext_data_control_manager
-            .create_data_source(&self.queue.handle(), ());
-        source.offer("text/plain;charset=utf-8".to_string());
-        source.offer("text/plain".to_string());
-        source.offer(self.mime_types.mask().to_string());
-
-        self.ext_data_control_device.set_selection(Some(&source));
+        let source = self.connection.offer_text(self.mime_types.mask())?;
         self.source_to_text.insert(source, text);
-        self.queue.flush()?;
         Ok(())
     }
 
@@ -269,7 +233,10 @@ impl State {
     }
 
     fn handle_wl_socket(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        for event in self.wl_events.read_until_blocked(&mut self.queue)? {
+        for event in self
+            .wl_events
+            .read_until_blocked(&mut self.connection.queue)?
+        {
             self.handle(event)?;
         }
 
@@ -328,7 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let epoll_result = state.epoll.wait(
             &mut state.epoll_events,
             None,
-            state._connection.as_fd(),
+            state.connection.as_fd(),
             &state.readers,
             &state.writers,
         )?;
@@ -336,8 +303,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         state.handle_epoll_result(epoll_result)?;
 
-        state.queue.flush()?;
-        state.queue.dispatch_pending(&mut state.wl_events)?;
+        state.connection.queue.flush()?;
+        state
+            .connection
+            .queue
+            .dispatch_pending(&mut state.wl_events)?;
     }
 
     state.cleanup();

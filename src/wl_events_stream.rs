@@ -1,4 +1,6 @@
 use crate::wl_event::{WlEvent, WlRegistryEvent};
+use crossbeam_queue::SegQueue;
+use std::sync::Arc;
 use wayland_client::{
     Connection, Dispatch, DispatchError, EventQueue, Proxy, QueueHandle,
     backend::WaylandError,
@@ -13,27 +15,29 @@ use wayland_protocols::ext::data_control::v1::client::{
 };
 
 pub(crate) struct WlEventsStream {
-    registry_events: Vec<WlRegistryEvent>,
     events: Vec<WlEvent>,
 }
 
 impl WlEventsStream {
     pub(crate) fn new() -> Self {
-        Self {
-            registry_events: vec![],
-            events: vec![],
-        }
+        Self { events: vec![] }
     }
 
     pub(crate) fn get_registry_and_registry_events_sync(
-        &mut self,
         conn: &Connection,
         queue: &mut EventQueue<Self>,
     ) -> Result<(WlRegistry, Vec<WlRegistryEvent>), DispatchError> {
-        let registry = conn.display().get_registry(&queue.handle(), ());
-        queue.roundtrip(self)?;
+        let buffer: Arc<SegQueue<WlRegistryEvent>> = Arc::new(SegQueue::new());
+        let registry = conn
+            .display()
+            .get_registry(&queue.handle(), Arc::clone(&buffer));
+        let mut this = Self { events: vec![] };
+        queue.roundtrip(&mut this)?;
 
-        let events = core::mem::take(&mut self.registry_events);
+        let mut events = vec![];
+        while let Some(event) = buffer.pop() {
+            events.push(event);
+        }
         Ok((registry, events))
     }
 
@@ -81,17 +85,17 @@ impl From<DispatchError> for WlEventStreamReadError {
     }
 }
 
-impl Dispatch<WlRegistry, ()> for WlEventsStream {
+impl Dispatch<WlRegistry, Arc<SegQueue<WlRegistryEvent>>> for WlEventsStream {
     fn event(
-        this: &mut Self,
+        _state: &mut Self,
         _registry: &WlRegistry,
         event: <WlRegistry as Proxy>::Event,
-        _data: &(),
+        events: &Arc<SegQueue<WlRegistryEvent>>,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
         match WlRegistryEvent::try_from(event) {
-            Ok(event) => this.registry_events.push(event),
+            Ok(event) => events.push(event),
 
             Err(unknown) => {
                 log::error!("unknown WlRegistry event: {unknown:?}")
@@ -102,7 +106,7 @@ impl Dispatch<WlRegistry, ()> for WlEventsStream {
 
 impl Dispatch<WlSeat, ()> for WlEventsStream {
     fn event(
-        _this: &mut Self,
+        _state: &mut Self,
         _proxy: &WlSeat,
         _event: <WlSeat as Proxy>::Event,
         _data: &(),
@@ -114,7 +118,7 @@ impl Dispatch<WlSeat, ()> for WlEventsStream {
 
 impl Dispatch<ExtDataControlManagerV1, ()> for WlEventsStream {
     fn event(
-        _this: &mut Self,
+        _state: &mut Self,
         _proxy: &ExtDataControlManagerV1,
         _event: <ExtDataControlManagerV1 as Proxy>::Event,
         _data: &(),
@@ -126,7 +130,7 @@ impl Dispatch<ExtDataControlManagerV1, ()> for WlEventsStream {
 
 impl Dispatch<ExtDataControlDeviceV1, ()> for WlEventsStream {
     fn event(
-        this: &mut Self,
+        Self { events }: &mut Self,
         _proxy: &ExtDataControlDeviceV1,
         event: <ExtDataControlDeviceV1 as Proxy>::Event,
         _data: &(),
@@ -134,7 +138,7 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WlEventsStream {
         _qhandle: &QueueHandle<Self>,
     ) {
         match WlEvent::try_from(event) {
-            Ok(wl_event) => this.events.push(wl_event),
+            Ok(wl_event) => events.push(wl_event),
 
             Err(unknown) => {
                 log::error!("unknown ExtDataControlDeviceV1 event: {unknown:?}")
@@ -154,7 +158,7 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WlEventsStream {
 
 impl Dispatch<ExtDataControlOfferV1, ()> for WlEventsStream {
     fn event(
-        this: &mut Self,
+        Self { events }: &mut Self,
         proxy: &ExtDataControlOfferV1,
         event: <ExtDataControlOfferV1 as Proxy>::Event,
         _data: &(),
@@ -162,7 +166,7 @@ impl Dispatch<ExtDataControlOfferV1, ()> for WlEventsStream {
         _qhandle: &QueueHandle<Self>,
     ) {
         match WlEvent::try_from((proxy.clone(), event)) {
-            Ok(wl_event) => this.events.push(wl_event),
+            Ok(wl_event) => events.push(wl_event),
 
             Err(unknown) => {
                 log::error!("unknown ExtDataControlOfferV1 event: {unknown:?}")
@@ -173,7 +177,7 @@ impl Dispatch<ExtDataControlOfferV1, ()> for WlEventsStream {
 
 impl Dispatch<ExtDataControlSourceV1, ()> for WlEventsStream {
     fn event(
-        this: &mut Self,
+        Self { events }: &mut Self,
         proxy: &ExtDataControlSourceV1,
         event: <ExtDataControlSourceV1 as Proxy>::Event,
         _data: &(),
@@ -181,7 +185,7 @@ impl Dispatch<ExtDataControlSourceV1, ()> for WlEventsStream {
         _qhandle: &QueueHandle<Self>,
     ) {
         match WlEvent::try_from((proxy.clone(), event)) {
-            Ok(wl_event) => this.events.push(wl_event),
+            Ok(wl_event) => events.push(wl_event),
 
             Err(unknown) => {
                 log::error!("unknown ExtDataControlSourceV1 event: {unknown:?}")

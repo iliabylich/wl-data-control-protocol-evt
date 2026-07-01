@@ -1,5 +1,5 @@
 use crate::{
-    connection::AppConnection,
+    app_connection::AppConnection,
     wl_event::{WlEvent, WlRegistryEvent},
 };
 use crossbeam_queue::SegQueue;

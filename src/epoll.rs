@@ -1,4 +1,3 @@
-use crate::{reader::Reader, writer::Writer};
 use rustix::{
     buffer::spare_capacity,
     event::epoll::{self, EventFlags},
@@ -35,11 +34,11 @@ impl Epoll {
     pub(crate) fn new(wl_fd: BorrowedFd<'_>) -> Result<Self, EpollError> {
         let epollfd = epoll::create(epoll::CreateFlags::CLOEXEC)?;
         let mut this = Self { epollfd };
-        this.add(wl_fd, EventFlags::IN)?;
+        this.register(wl_fd, EventFlags::IN)?;
         Ok(this)
     }
 
-    fn add(&mut self, fd: BorrowedFd<'_>, flags: EventFlags) -> Result<(), EpollError> {
+    fn register(&mut self, fd: BorrowedFd<'_>, flags: EventFlags) -> Result<(), EpollError> {
         epoll::add(
             &self.epollfd,
             fd,
@@ -49,12 +48,12 @@ impl Epoll {
         Ok(())
     }
 
-    pub(crate) fn add_reader(&mut self, reader: &Reader) -> Result<(), EpollError> {
-        self.add(reader.as_fd(), EventFlags::IN)
+    pub(crate) fn register_readable(&mut self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
+        self.register(fd, EventFlags::IN)
     }
 
-    pub(crate) fn add_writer(&mut self, writer: &Writer) -> Result<(), EpollError> {
-        self.add(writer.as_fd(), EventFlags::OUT)
+    pub(crate) fn register_writable(&mut self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
+        self.register(fd, EventFlags::OUT)
     }
 
     pub(crate) fn delete(&mut self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
@@ -62,13 +61,13 @@ impl Epoll {
         Ok(())
     }
 
-    pub(crate) fn wait(
+    pub(crate) fn wait<R, W>(
         &mut self,
         epoll_events: &mut Vec<epoll::Event>,
         timeout: Option<&Timespec>,
         wl_fd: BorrowedFd<'_>,
-        readers: &HashMap<i32, Reader>,
-        writers: &HashMap<i32, Writer>,
+        readers: &HashMap<i32, R>,
+        writers: &HashMap<i32, W>,
     ) -> Result<EpollResult, EpollError> {
         log::trace!("epoll_wait()...");
         epoll::wait(&self.epollfd, spare_capacity(epoll_events), timeout)?;
@@ -102,11 +101,11 @@ pub(crate) struct EpollResult {
 }
 
 impl EpollResult {
-    fn new(
+    fn new<R, W>(
         events: &[epoll::Event],
         wl_fd: BorrowedFd<'_>,
-        readers: &HashMap<i32, Reader>,
-        writers: &HashMap<i32, Writer>,
+        readers: &HashMap<i32, R>,
+        writers: &HashMap<i32, W>,
     ) -> Result<Self, EpollError> {
         let mut wl_is_readable = false;
         let mut readers_fd_set = FdSet::default();

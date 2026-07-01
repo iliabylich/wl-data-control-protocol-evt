@@ -1,3 +1,5 @@
+use rustix::fs::Timespec;
+
 use crate::{
     app_connection::AppConnection,
     epoll::{Epoll, EpollError, EpollResult},
@@ -66,7 +68,7 @@ impl ExtDataControlStream {
 
     pub(crate) fn offer_text(
         &mut self,
-        text: String,
+        text: impl Into<String>,
     ) -> Result<(), wayland_client::backend::WaylandError> {
         let source = self
             .connection
@@ -177,7 +179,10 @@ impl ExtDataControlStream {
     pub(crate) fn read(&mut self) -> Result<Vec<ExtDataControlEvent>, Box<dyn std::error::Error>> {
         let epoll_result = self.epoll.wait(
             &mut self.epoll_events,
-            None,
+            Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }),
             self.connection.as_fd(),
             &self.readers,
             &self.writers,

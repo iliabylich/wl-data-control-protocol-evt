@@ -40,10 +40,10 @@ impl ReaderWriterStream {
 
     pub(crate) fn save_offer(
         &mut self,
-        text: String,
+        text: impl Into<String>,
         source: ExtDataControlSourceV1,
     ) -> Result<(), wayland_client::backend::WaylandError> {
-        self.source_to_text.insert(source, text);
+        self.source_to_text.insert(source, text.into());
         Ok(())
     }
 

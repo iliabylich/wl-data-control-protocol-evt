@@ -5,7 +5,7 @@ use crate::{
 use crossbeam_queue::SegQueue;
 use std::os::fd::{AsFd, AsRawFd};
 use wayland_client::{
-    ConnectError, Connection as WlConnection, DispatchError, EventQueue, backend::WaylandError,
+    ConnectError, Connection, DispatchError, EventQueue, backend::WaylandError,
     protocol::wl_seat::WlSeat,
 };
 use wayland_protocols::ext::data_control::v1::client::{
@@ -18,7 +18,7 @@ static WL_REGISTRY_EVENTS_QUEUE: SegQueue<WlRegistryEvent> = SegQueue::new();
 static WL_EVENTS_QUEUE: SegQueue<WlEvent> = SegQueue::new();
 
 pub(crate) struct AppConnection {
-    pub(crate) conn: WlConnection,
+    pub(crate) conn: Connection,
     pub(crate) queue: EventQueue<WlEventsStream>,
 
     pub(crate) wl_seat: WlSeat,
@@ -28,11 +28,11 @@ pub(crate) struct AppConnection {
 
 impl AppConnection {
     pub(crate) fn connect() -> Result<Self, ConnectorError> {
-        let conn = WlConnection::connect_to_env()?;
+        let conn = Connection::connect_to_env()?;
         let mut queue = conn.new_event_queue::<WlEventsStream>();
-
         let (wl_seat, ext_data_control_manager, ext_data_control_device) =
             get_startup_objects(&conn, &mut queue)?;
+        queue.flush().unwrap();
 
         Ok(Self {
             conn,
@@ -104,7 +104,7 @@ impl AsRawFd for AppConnection {
 }
 
 pub(crate) fn get_startup_objects(
-    conn: &WlConnection,
+    conn: &Connection,
     queue: &mut EventQueue<WlEventsStream>,
 ) -> Result<(WlSeat, ExtDataControlManagerV1, ExtDataControlDeviceV1), ConnectorError> {
     let registry = conn

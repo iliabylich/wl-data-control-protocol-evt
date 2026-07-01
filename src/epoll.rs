@@ -9,12 +9,13 @@ use std::{
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
 };
 
-pub(crate) struct Epoll {
+pub struct Epoll {
     epollfd: OwnedFd,
 }
 
+/// An error returned from `epoll`
 #[derive(Debug)]
-pub struct EpollError(Errno);
+pub struct EpollError(pub Errno);
 
 impl From<Errno> for EpollError {
     fn from(errno: Errno) -> Self {
@@ -33,12 +34,13 @@ impl core::error::Error for EpollError {}
 impl Epoll {
     pub(crate) fn new(wl_fd: BorrowedFd<'_>) -> Result<Self, EpollError> {
         let epollfd = epoll::create(epoll::CreateFlags::CLOEXEC)?;
-        let mut this = Self { epollfd };
+        let this = Self { epollfd };
         this.register(wl_fd, EventFlags::IN)?;
         Ok(this)
     }
 
-    fn register(&mut self, fd: BorrowedFd<'_>, flags: EventFlags) -> Result<(), EpollError> {
+    #[expect(clippy::cast_sign_loss)]
+    fn register(&self, fd: BorrowedFd<'_>, flags: EventFlags) -> Result<(), EpollError> {
         epoll::add(
             &self.epollfd,
             fd,
@@ -48,21 +50,21 @@ impl Epoll {
         Ok(())
     }
 
-    pub(crate) fn register_readable(&mut self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
+    pub(crate) fn register_readable(&self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
         self.register(fd, EventFlags::IN)
     }
 
-    pub(crate) fn register_writable(&mut self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
+    pub(crate) fn register_writable(&self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
         self.register(fd, EventFlags::OUT)
     }
 
-    pub(crate) fn delete(&mut self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
+    pub(crate) fn delete(&self, fd: BorrowedFd<'_>) -> Result<(), EpollError> {
         epoll::delete(&self.epollfd, fd)?;
         Ok(())
     }
 
     pub(crate) fn wait<R, W>(
-        &mut self,
+        &self,
         epoll_events: &mut Vec<epoll::Event>,
         timeout: Option<&Timespec>,
         wl_fd: BorrowedFd<'_>,
@@ -75,7 +77,7 @@ impl Epoll {
 }
 
 impl AsFd for Epoll {
-    fn as_fd(&self) -> std::os::unix::prelude::BorrowedFd<'_> {
+    fn as_fd(&self) -> BorrowedFd<'_> {
         self.epollfd.as_fd()
     }
 }
@@ -87,19 +89,20 @@ impl AsRawFd for Epoll {
 }
 
 #[derive(Default)]
-pub(crate) struct FdSet {
+pub struct FdSet {
     pub(crate) ready: Vec<i32>,
     pub(crate) dead: Vec<i32>,
 }
 
 #[derive(Default)]
-pub(crate) struct EpollResult {
+pub struct EpollResult {
     pub(crate) wl_is_readable: bool,
     pub(crate) readers: FdSet,
     pub(crate) writers: FdSet,
 }
 
 impl EpollResult {
+    #[expect(clippy::cast_possible_truncation)]
     fn new<R, W>(
         events: &[epoll::Event],
         wl_fd: BorrowedFd<'_>,
@@ -112,32 +115,32 @@ impl EpollResult {
 
         for event in events {
             let fd = event.data.u64() as i32;
-            let revents: epoll::EventFlags = event.flags;
+            let revents: EventFlags = event.flags;
 
             if fd == wl_fd.as_raw_fd() {
-                if revents.intersects(epoll::EventFlags::HUP | epoll::EventFlags::ERR) {
+                if revents.intersects(EventFlags::HUP | EventFlags::ERR) {
                     return Err(EpollError(Errno::CONNRESET));
-                } else if revents.contains(epoll::EventFlags::IN) {
+                } else if revents.contains(EventFlags::IN) {
                     wl_is_readable = true;
                 }
             } else if readers.contains_key(&fd) {
-                if revents.intersects(epoll::EventFlags::ERR) {
+                if revents.intersects(EventFlags::ERR) {
                     log::error!("reader with FD {fd} returned revents {revents:?}, removing it");
                     readers_fd_set.dead.push(fd);
-                } else if revents.intersects(epoll::EventFlags::IN | epoll::EventFlags::HUP) {
+                } else if revents.intersects(EventFlags::IN | EventFlags::HUP) {
                     readers_fd_set.ready.push(fd);
                 }
             } else if writers.contains_key(&fd) {
-                if revents.intersects(epoll::EventFlags::ERR | epoll::EventFlags::HUP) {
+                if revents.intersects(EventFlags::ERR | EventFlags::HUP) {
                     log::error!("writer with FD {fd} returned revents {revents:?}, removing it");
                     writers_fd_set.dead.push(fd);
-                } else if revents.contains(epoll::EventFlags::OUT) {
+                } else if revents.contains(EventFlags::OUT) {
                     writers_fd_set.ready.push(fd);
                 }
             }
         }
 
-        Ok(EpollResult {
+        Ok(Self {
             wl_is_readable,
             readers: readers_fd_set,
             writers: writers_fd_set,

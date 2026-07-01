@@ -11,7 +11,7 @@ use wayland_protocols::ext::data_control::v1::client::{
 };
 
 #[derive(Debug)]
-pub(crate) enum WlRegistryEvent {
+pub enum WlRegistryEvent {
     WlSeat { name: u32, version: u32 },
     ExtDataControlManager { name: u32, version: u32 },
     Other,
@@ -43,7 +43,7 @@ impl TryFrom<RegistryEvent> for WlRegistryEvent {
 }
 
 #[derive(Debug)]
-pub(crate) enum WlOfferEvent {
+pub enum WlOfferEvent {
     DataOffer(ExtDataControlOfferV1),
     Selection(Option<ExtDataControlOfferV1>),
     PrimarySelection(Option<ExtDataControlOfferV1>),
@@ -52,13 +52,13 @@ pub(crate) enum WlOfferEvent {
 }
 
 #[derive(Debug)]
-pub(crate) enum WlSourceEvent {
+pub enum WlSourceEvent {
     Requested(ExtDataControlSourceV1, String, OwnedFd),
     Cancelled(ExtDataControlSourceV1),
 }
 
 #[derive(Debug)]
-pub(crate) enum WlEvent {
+pub enum WlEvent {
     Offer(WlOfferEvent),
     Source(WlSourceEvent),
 }

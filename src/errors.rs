@@ -1,13 +1,20 @@
 use crate::EpollError;
 use wayland_client::{ConnectError, DispatchError, backend::WaylandError};
 
+/// An error that may occur when establishing connection to Wayland
 #[derive(Debug)]
 pub enum ExtDataControlConnectError {
+    /// failed to connect
     ConnectError(ConnectError),
+    /// failed to send events
     DispatchError(DispatchError),
+    /// wayland returned an error
     WaylandError(WaylandError),
+    /// failed to call any of `epoll*` functions
     EpollError(EpollError),
+    /// no seat was returned from wayland (something is completely broken)
     NoSeat,
+    /// `ext-data-control` protocol is not supported by compositor
     Unsupported,
 }
 
@@ -50,18 +57,21 @@ impl From<EpollError> for ExtDataControlConnectError {
     }
 }
 
-//
-
+/// An error that may occur during reading from Wayland socket
 #[derive(Debug)]
 pub enum ExtDataControlReadError {
-    WaylandError(WaylandError),
+    /// failed to send events
     DispatchError(DispatchError),
+    /// wayland returned an error
+    WaylandError(WaylandError),
+    /// failed to acquire a lock on a queue
     FailedToCreateReadGuard,
+    /// failed to call any of `epoll*` functions
     EpollError(EpollError),
 }
 
 impl core::fmt::Display for ExtDataControlReadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::WaylandError(err) => write!(f, "WaylandError({err})"),
             Self::DispatchError(err) => write!(f, "DispatchError({err})"),

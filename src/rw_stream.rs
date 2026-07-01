@@ -11,7 +11,7 @@ use rustix::pipe::PipeFlags;
 use std::{collections::HashMap, os::fd::AsFd as _};
 use wayland_protocols::ext::data_control::v1::client::ext_data_control_source_v1::ExtDataControlSourceV1;
 
-pub(crate) struct ReaderWriterStream {
+pub struct ReaderWriterStream {
     offer_seq: OfferSeq,
     source_to_text: HashMap<ExtDataControlSourceV1, String>,
     mime_types: MimeTypes,
@@ -39,19 +39,14 @@ impl ReaderWriterStream {
         Ok(events)
     }
 
-    pub(crate) fn save_offer(
-        &mut self,
-        text: impl Into<String>,
-        source: ExtDataControlSourceV1,
-    ) -> Result<(), wayland_client::backend::WaylandError> {
+    pub(crate) fn save_offer(&mut self, text: impl Into<String>, source: ExtDataControlSourceV1) {
         self.source_to_text.insert(source, text.into());
-        Ok(())
     }
 
     pub(crate) fn cleanup(&mut self) {
         self.offer_seq.destroy();
         for source in self.source_to_text.keys() {
-            source.destroy()
+            source.destroy();
         }
     }
 
@@ -78,7 +73,7 @@ impl ReaderWriterStream {
 
             WlOfferEvent::Selection(Some(offer)) => {
                 let (offer, mime_types) = self.offer_seq.finish(offer)?;
-                let Some(mime_type_to_ask_for) = self.mime_types.choose(mime_types) else {
+                let Some(mime_type_to_ask_for) = self.mime_types.choose(&mime_types) else {
                     offer.destroy();
                     return None;
                 };
@@ -142,7 +137,7 @@ impl ReaderWriterStream {
     }
 }
 
-pub(crate) enum ReaderWriterEvent {
+pub enum ReaderWriterEvent {
     NewReader(Box<Reader>),
     NewWriter(Writer),
     Finished,

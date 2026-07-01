@@ -7,37 +7,16 @@ use std::{
     os::fd::{AsFd, AsRawFd, OwnedFd},
 };
 
-pub(crate) struct Writer {
+pub struct Writer {
     fd: OwnedFd,
     buf: Vec<u8>,
     pos: usize,
 }
 
-pub(crate) enum WriteResult {
+pub enum WriteResult {
     Done,
     Pending,
 }
-
-#[derive(Debug)]
-pub(crate) enum WriterCreationError {
-    FailedToMakeFdNonBlocking(Errno),
-}
-
-impl From<Errno> for WriterCreationError {
-    fn from(err: Errno) -> Self {
-        Self::FailedToMakeFdNonBlocking(err)
-    }
-}
-
-impl core::fmt::Display for WriterCreationError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::FailedToMakeFdNonBlocking(errno) => write!(f, "{errno}"),
-        }
-    }
-}
-
-impl core::error::Error for WriterCreationError {}
 
 fn set_nonblocking(fd: impl AsFd) -> Result<(), Errno> {
     let mut flags = fcntl_getfl(&fd)?;
@@ -46,8 +25,9 @@ fn set_nonblocking(fd: impl AsFd) -> Result<(), Errno> {
     Ok(())
 }
 
+#[expect(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 impl Writer {
-    pub(crate) fn new(fd: OwnedFd, text: String) -> Result<Self, WriterCreationError> {
+    pub(crate) fn new(fd: OwnedFd, text: String) -> Result<Self, Errno> {
         set_nonblocking(&fd)?;
 
         Ok(Self {

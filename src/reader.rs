@@ -5,37 +5,21 @@ use std::{
 };
 use wayland_protocols::ext::data_control::v1::client::ext_data_control_offer_v1::ExtDataControlOfferV1;
 
-pub(crate) struct Reader {
+pub struct Reader {
     fd: OwnedFd,
     buf: [u8; 1_024],
     len: usize,
     offer: ExtDataControlOfferV1,
 }
 
-pub(crate) enum ReadResult {
+pub enum ReadResult {
     Done(String),
     Pending,
 }
 
-#[derive(Debug)]
-pub(crate) enum ReadError {
-    Errno(Errno),
-    GotNonUtf8,
-}
-
-impl core::fmt::Display for ReadError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            ReadError::Errno(errno) => write!(f, "{errno}"),
-            ReadError::GotNonUtf8 => write!(f, "GotNonUtf8"),
-        }
-    }
-}
-
-impl core::error::Error for ReadError {}
-
+#[expect(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 impl Reader {
-    pub(crate) fn new(fd: OwnedFd, offer: ExtDataControlOfferV1) -> Self {
+    pub(crate) const fn new(fd: OwnedFd, offer: ExtDataControlOfferV1) -> Self {
         Self {
             fd,
             buf: [0; _],
@@ -88,3 +72,20 @@ impl AsRawFd for Reader {
         self.fd.as_raw_fd()
     }
 }
+
+#[derive(Debug)]
+pub enum ReadError {
+    Errno(Errno),
+    GotNonUtf8,
+}
+
+impl core::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Errno(errno) => write!(f, "{errno}"),
+            Self::GotNonUtf8 => write!(f, "GotNonUtf8"),
+        }
+    }
+}
+
+impl core::error::Error for ReadError {}

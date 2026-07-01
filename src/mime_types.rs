@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-pub(crate) struct MimeTypes {
+pub struct MimeTypes {
     mask: String,
 }
 
@@ -21,12 +21,12 @@ impl MimeTypes {
         &self.mask
     }
 
-    pub(crate) fn choose(&self, mime_types: HashSet<String>) -> Option<String> {
+    pub(crate) fn choose(&self, mime_types: &HashSet<String>) -> Option<String> {
         if mime_types.contains(&self.mask) {
             None
-        } else if mime_types.contains(MimeTypes::TEXT_UTF8) {
+        } else if mime_types.contains(Self::TEXT_UTF8) {
             Some(Self::TEXT_UTF8.to_string())
-        } else if mime_types.contains(MimeTypes::TEXT) {
+        } else if mime_types.contains(Self::TEXT) {
             Some(Self::TEXT.to_string())
         } else {
             None

@@ -14,6 +14,7 @@ use std::{
 };
 use wayland_client::backend::WaylandError;
 
+/// The main object to send and receive events over `ext-data-control` Wayland protocol
 pub struct ExtDataControlStream {
     connection: AppConnection,
     rw_stream: ReaderWriterStream,
@@ -26,6 +27,11 @@ pub struct ExtDataControlStream {
 }
 
 impl ExtDataControlStream {
+    /// Constructor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of initialisation step fails
     pub fn new() -> Result<Self, ExtDataControlConnectError> {
         let connection = AppConnection::connect()?;
         let epoll = Epoll::new(connection.as_fd())?;
@@ -42,6 +48,9 @@ impl ExtDataControlStream {
         })
     }
 
+    /// Performs a synchronous cleanup.
+    ///
+    /// Optional, do it if you consider yourself a good citizen.
     pub fn cleanup(&mut self) {
         for reader in self.readers.values() {
             reader.destroy();
@@ -67,11 +76,16 @@ impl ExtDataControlStream {
         Ok(())
     }
 
+    /// Push a text, so that other Wayland clients (i.e. apps) can "paste" it
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any internal component has errored.
     pub fn offer_text(&mut self, text: impl Into<String>) -> Result<(), WaylandError> {
         let source = self
             .connection
             .offer_text(self.rw_stream.mime_type_mask())?;
-        self.rw_stream.save_offer(text, source)?;
+        self.rw_stream.save_offer(text, source);
         Ok(())
     }
 
@@ -168,6 +182,14 @@ impl ExtDataControlStream {
         Ok(())
     }
 
+    /// Reads/writes events until it gets `WouldBlock` error, assuming that there's something to read.
+    ///
+    /// This method should be called if you know that Wayland socket is readable
+    /// (i.e. by calling `select`/`poll`/`epoll` on a file descriptor of `ExtDataControlStream` object)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of underlying components errored.
     pub fn read(&mut self) -> Result<Vec<ExtDataControlEvent>, ExtDataControlReadError> {
         let epoll_result = self.epoll.wait(
             &mut self.epoll_events,
@@ -205,8 +227,12 @@ impl AsRawFd for ExtDataControlStream {
     }
 }
 
+/// An event. A collection of events is returned from `ExtDataControlStream::read()`.
 #[derive(Debug)]
 pub enum ExtDataControlEvent {
+    /// New text is received (i.e. someone copied text to clipboard)
     Received(String),
+    /// `ext-data-control-device` has finished (i.e. no copy-paste allowed anymore).
+    /// Should only happen if your compositor goes crazy.
     Finished,
 }

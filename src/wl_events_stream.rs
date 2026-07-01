@@ -14,7 +14,7 @@ use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_source_v1::ExtDataControlSourceV1,
 };
 
-pub(crate) struct WlEventsStream;
+pub struct WlEventsStream;
 
 impl Dispatch<WlRegistry, &SegQueue<WlRegistryEvent>> for WlEventsStream {
     fn event(
@@ -29,7 +29,7 @@ impl Dispatch<WlRegistry, &SegQueue<WlRegistryEvent>> for WlEventsStream {
             Ok(event) => events.push(event),
 
             Err(unknown) => {
-                log::error!("unknown WlRegistry event: {unknown:?}")
+                log::error!("unknown WlRegistry event: {unknown:?}");
             }
         }
     }
@@ -72,7 +72,7 @@ impl Dispatch<ExtDataControlDeviceV1, &SegQueue<WlEvent>> for WlEventsStream {
             Ok(wl_event) => events.push(wl_event),
 
             Err(unknown) => {
-                log::error!("unknown ExtDataControlDeviceV1 event: {unknown:?}")
+                log::error!("unknown ExtDataControlDeviceV1 event: {unknown:?}");
             }
         }
     }
@@ -100,7 +100,7 @@ impl Dispatch<ExtDataControlOfferV1, &SegQueue<WlEvent>> for WlEventsStream {
             Ok(wl_event) => events.push(wl_event),
 
             Err(unknown) => {
-                log::error!("unknown ExtDataControlOfferV1 event: {unknown:?}")
+                log::error!("unknown ExtDataControlOfferV1 event: {unknown:?}");
             }
         }
     }
@@ -119,7 +119,7 @@ impl Dispatch<ExtDataControlSourceV1, &SegQueue<WlEvent>> for WlEventsStream {
             Ok(wl_event) => events.push(wl_event),
 
             Err(unknown) => {
-                log::error!("unknown ExtDataControlSourceV1 event: {unknown:?}")
+                log::error!("unknown ExtDataControlSourceV1 event: {unknown:?}");
             }
         }
     }

@@ -1,5 +1,5 @@
 use crate::{
-    errors::{ExtDataControlReadError, ExtDataControlConnectError},
+    errors::{ExtDataControlConnectError, ExtDataControlReadError},
     wl_event::{WlEvent, WlRegistryEvent},
     wl_events_stream::WlEventsStream,
 };
@@ -15,13 +15,13 @@ use wayland_protocols::ext::data_control::v1::client::{
 static WL_REGISTRY_EVENTS_QUEUE: SegQueue<WlRegistryEvent> = SegQueue::new();
 static WL_EVENTS_QUEUE: SegQueue<WlEvent> = SegQueue::new();
 
-pub(crate) struct AppConnection {
-    pub(crate) conn: Connection,
+pub struct AppConnection {
+    conn: Connection,
     pub(crate) queue: EventQueue<WlEventsStream>,
 
-    pub(crate) wl_seat: WlSeat,
-    pub(crate) ext_data_control_manager: ExtDataControlManagerV1,
-    pub(crate) ext_data_control_device: ExtDataControlDeviceV1,
+    wl_seat: WlSeat,
+    ext_data_control_manager: ExtDataControlManagerV1,
+    ext_data_control_device: ExtDataControlDeviceV1,
 }
 
 impl AppConnection {
@@ -101,7 +101,7 @@ impl AsRawFd for AppConnection {
     }
 }
 
-pub(crate) fn get_startup_objects(
+fn get_startup_objects(
     conn: &Connection,
     queue: &mut EventQueue<WlEventsStream>,
 ) -> Result<(WlSeat, ExtDataControlManagerV1, ExtDataControlDeviceV1), ExtDataControlConnectError> {

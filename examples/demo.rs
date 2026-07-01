@@ -14,13 +14,13 @@ fn main() -> Result<()> {
     env_logger::init();
 
     let timerfd = create_timer()?;
-    let mut state = ExtDataControlStream::new().context("failed to create ExtDataControlStream")?;
+    let mut stream = ExtDataControlStream::new()?;
     let mut tick = 5;
 
     'outer: loop {
         let mut pollfds = [
             PollFd::new(&timerfd, PollFlags::IN),
-            PollFd::new(&state, PollFlags::IN),
+            PollFd::new(&stream, PollFlags::IN),
         ];
         poll(&mut pollfds, None).context("poll() failed")?;
         let revents = [pollfds[0].revents(), pollfds[1].revents()];
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 
                 tick += 1;
                 if tick % 10 == 0 {
-                    state.offer_text(format!("text{tick}"))?;
+                    stream.offer_text(format!("text{tick}"))?;
                 }
             }
             Some(REvents::Err) => bail!("timer returned err"),
@@ -46,7 +46,7 @@ fn main() -> Result<()> {
         match REvents::new(revents[1]) {
             Some(REvents::Readable) => {
                 log::trace!("wl is readable");
-                for event in state.read()? {
+                for event in stream.read()? {
                     println!("{event:?}");
 
                     if let ExtDataControlEvent::Received(text) = event
@@ -61,7 +61,7 @@ fn main() -> Result<()> {
         }
     }
 
-    state.cleanup();
+    stream.cleanup();
 
     Ok(())
 }

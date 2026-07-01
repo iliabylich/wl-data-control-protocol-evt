@@ -20,7 +20,7 @@ mod offer_seq;
 use offer_seq::OfferSeq;
 
 mod wl_event;
-use wl_event::{WlEvent, WlOfferEvent, WlRegistryEvent, WlSourceEvent};
+use wl_event::{WlEvent, WlOfferEvent, WlSourceEvent};
 
 mod wl_state;
 use wl_state::WlState;
@@ -31,12 +31,16 @@ use mime_types::MimeTypes;
 mod epoll;
 use epoll::{Epoll, EpollError, EpollResult};
 
+mod connector;
+use connector::{Connector, ConnectorOutput};
+
 struct State {
     wl_seat: WlSeat,
     ext_data_control_manager: ExtDataControlManagerV1,
     ext_data_control_device: ExtDataControlDeviceV1,
 
     epoll: Epoll,
+    epoll_events: Vec<rustix::event::epoll::Event>,
     running: bool,
 
     _connection: Connection,
@@ -51,77 +55,16 @@ struct State {
     source_to_text: HashMap<ExtDataControlSourceV1, String>,
 }
 
-#[derive(Debug)]
-enum ConnectError {
-    WaylandConnectError(wayland_client::ConnectError),
-    WaylandDispatchError(wayland_client::DispatchError),
-    NoSeat,
-    Unsupported,
-    EpollError(EpollError),
-}
-
-impl From<EpollError> for ConnectError {
-    fn from(err: EpollError) -> Self {
-        Self::EpollError(err)
-    }
-}
-
-impl From<wayland_client::ConnectError> for ConnectError {
-    fn from(err: wayland_client::ConnectError) -> Self {
-        Self::WaylandConnectError(err)
-    }
-}
-
-impl From<wayland_client::DispatchError> for ConnectError {
-    fn from(err: wayland_client::DispatchError) -> Self {
-        Self::WaylandDispatchError(err)
-    }
-}
-
-impl core::fmt::Display for ConnectError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::WaylandConnectError(err) => write!(f, "WaylandConnectError({err})"),
-            Self::WaylandDispatchError(err) => write!(f, "WaylandDispatchError({err})"),
-            Self::NoSeat => write!(f, "NoSeat"),
-            Self::Unsupported => write!(f, "Unsupported"),
-            Self::EpollError(err) => write!(f, "EpollError({err})"),
-        }
-    }
-}
-
-impl core::error::Error for ConnectError {}
-
 impl State {
-    fn connect() -> Result<Self, ConnectError> {
-        let conn = Connection::connect_to_env()?;
-        let mut wl = WlState::new();
-        let mut queue = conn.new_event_queue::<WlState>();
-
-        let registry = conn.display().get_registry(&queue.handle(), ());
-        queue.roundtrip(&mut wl)?;
-
-        let mut wl_seat: Option<WlSeat> = None;
-        let mut ext_data_control_manager: Option<ExtDataControlManagerV1> = None;
-
-        while let Some(event) = wl.registry_events.pop_front() {
-            match event {
-                WlRegistryEvent::WlSeat { name, version } => {
-                    wl_seat = Some(registry.bind(name, version, &queue.handle(), ()));
-                }
-                WlRegistryEvent::ExtDataControlManager { name, version } => {
-                    ext_data_control_manager =
-                        Some(registry.bind(name, version, &queue.handle(), ()));
-                }
-                WlRegistryEvent::Other => {}
-            }
-        }
-
-        let wl_seat = wl_seat.ok_or(ConnectError::NoSeat)?;
-        let ext_data_control_manager = ext_data_control_manager.ok_or(ConnectError::Unsupported)?;
-
-        let ext_data_control_device =
-            ext_data_control_manager.get_data_device(&wl_seat, &queue.handle(), ());
+    fn connect() -> Result<Self, Box<dyn std::error::Error>> {
+        let ConnectorOutput {
+            conn,
+            wl,
+            queue,
+            wl_seat,
+            ext_data_control_manager,
+            ext_data_control_device,
+        } = Connector::connect()?;
 
         Ok(State {
             wl_seat,
@@ -130,6 +73,7 @@ impl State {
 
             running: true,
             epoll: Epoll::new(&conn)?,
+            epoll_events: Vec::with_capacity(16),
 
             wl,
             queue,
@@ -288,6 +232,78 @@ impl State {
         self.queue.flush()?;
         Ok(())
     }
+
+    fn handle_epoll_result(
+        &mut self,
+        epoll_result: EpollResult,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let EpollResult {
+            wl_is_readable,
+            readers,
+            writers,
+        } = epoll_result;
+
+        if wl_is_readable {
+            let wl_read_guard = self
+                .queue
+                .prepare_read()
+                .expect("failed to create ReadEventsGuard");
+            wl_read_guard.read()?;
+            self.queue.dispatch_pending(&mut self.wl)?;
+
+            while let Some(event) = self.wl.events.pop_front() {
+                self.handle(event)?;
+            }
+        }
+
+        for fd in readers.dead {
+            self.remove_reader(fd)?;
+        }
+
+        for fd in writers.dead {
+            self.remove_writer(fd)?;
+        }
+
+        for fd in readers.ready {
+            if let Some(reader) = self.readers.get_mut(&fd) {
+                log::trace!("Reading {fd:?}");
+                match reader.read() {
+                    Ok(ReadResult::Done(text)) => {
+                        log::trace!("Got text {text:?}");
+                        self.remove_reader(fd)?;
+
+                        if text == "EXIT" {
+                            self.running = false;
+                        }
+                    }
+                    Ok(ReadResult::Pending) => {}
+                    Err(err) => {
+                        log::error!("reader {fd:?} returned error {err:?}");
+                        self.remove_reader(fd)?;
+                    }
+                }
+            }
+        }
+
+        for fd in writers.ready {
+            if let Some(writer) = self.writers.get_mut(&fd) {
+                log::trace!("Writing {fd:?}");
+                match writer.write() {
+                    Ok(WriteResult::Done) => {
+                        log::trace!("Done writing to {fd:?}");
+                        self.remove_writer(fd)?;
+                    }
+                    Ok(WriteResult::Pending) => {}
+                    Err(err) => {
+                        log::error!("writer {fd:?} returned error {err:?}");
+                        self.remove_writer(fd)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -296,82 +312,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = State::connect()?;
     state.offer_text(String::from("BOO"))?;
 
-    let mut epoll_events = Vec::with_capacity(16);
-
     while state.running {
         state.queue.flush()?;
         state.queue.dispatch_pending(&mut state.wl)?;
 
-        let wl_read_guard = state
-            .queue
-            .prepare_read()
-            .expect("failed to create ReadEventsGuard");
+        let epoll_result = state.epoll.wait(
+            &mut state.epoll_events,
+            None,
+            &state.readers,
+            &state.writers,
+        )?;
+        state.epoll_events.clear();
 
-        let EpollResult {
-            wl_is_readable,
-            readers,
-            writers,
-        } = state
-            .epoll
-            .wait(&mut epoll_events, None, &state.readers, &state.writers)?;
-        epoll_events.clear();
-
-        if wl_is_readable {
-            wl_read_guard.read()?;
-            state.queue.dispatch_pending(&mut state.wl)?;
-
-            while let Some(event) = state.wl.events.pop_front() {
-                state.handle(event)?;
-            }
-        } else {
-            drop(wl_read_guard);
-        }
-
-        for fd in readers.dead {
-            state.remove_reader(fd)?;
-        }
-
-        for fd in writers.dead {
-            state.remove_writer(fd)?;
-        }
-
-        for fd in readers.ready {
-            if let Some(reader) = state.readers.get_mut(&fd) {
-                log::trace!("Reading {fd:?}");
-                match reader.read() {
-                    Ok(ReadResult::Done(text)) => {
-                        log::trace!("Got text {text:?}");
-                        state.remove_reader(fd)?;
-
-                        if text == "EXIT" {
-                            state.running = false;
-                        }
-                    }
-                    Ok(ReadResult::Pending) => {}
-                    Err(err) => {
-                        log::error!("reader {fd:?} returned error {err:?}");
-                        state.remove_reader(fd)?;
-                    }
-                }
-            }
-        }
-
-        for fd in writers.ready {
-            if let Some(writer) = state.writers.get_mut(&fd) {
-                log::trace!("Writing {fd:?}");
-                match writer.write() {
-                    Ok(WriteResult::Done) => {
-                        log::trace!("Done writing to {fd:?}");
-                        state.remove_writer(fd)?;
-                    }
-                    Ok(WriteResult::Pending) => {}
-                    Err(err) => {
-                        log::error!("writer {fd:?} returned error {err:?}");
-                        state.remove_writer(fd)?;
-                    }
-                }
-            }
-        }
+        state.handle_epoll_result(epoll_result)?;
     }
 
     state.cleanup();

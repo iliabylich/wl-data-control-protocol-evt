@@ -38,12 +38,11 @@ impl ReaderWriterStream {
         Ok(events)
     }
 
-    pub(crate) fn offer_text(
+    pub(crate) fn save_offer(
         &mut self,
         text: String,
-        conn: &mut AppConnection,
+        source: ExtDataControlSourceV1,
     ) -> Result<(), wayland_client::backend::WaylandError> {
-        let source = conn.offer_text(self.mime_types.mask())?;
         self.source_to_text.insert(source, text);
         Ok(())
     }
@@ -53,6 +52,10 @@ impl ReaderWriterStream {
         for source in self.source_to_text.keys() {
             source.destroy()
         }
+    }
+
+    pub(crate) fn mime_type_mask(&self) -> &str {
+        self.mime_types.mask()
     }
 
     fn map_any(&mut self, event: WlEvent) -> Option<ReaderWriterEvent> {

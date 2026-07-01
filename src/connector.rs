@@ -1,4 +1,4 @@
-use crate::{wl_event::WlRegistryEvent, wl_state::WlState};
+use crate::{wl_event::WlRegistryEvent, wl_events_stream::WlEventsStream};
 use wayland_client::{Connection, EventQueue, protocol::wl_seat::WlSeat};
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_device_v1::ExtDataControlDeviceV1,
@@ -9,8 +9,8 @@ pub(crate) struct Connector;
 
 pub(crate) struct ConnectorOutput {
     pub(crate) conn: Connection,
-    pub(crate) wl: WlState,
-    pub(crate) queue: EventQueue<WlState>,
+    pub(crate) wl_events: WlEventsStream,
+    pub(crate) queue: EventQueue<WlEventsStream>,
 
     pub(crate) wl_seat: WlSeat,
     pub(crate) ext_data_control_manager: ExtDataControlManagerV1,
@@ -20,15 +20,15 @@ pub(crate) struct ConnectorOutput {
 impl Connector {
     pub(crate) fn connect() -> Result<ConnectorOutput, ConnectorError> {
         let conn = Connection::connect_to_env()?;
-        let mut queue = conn.new_event_queue::<WlState>();
-        let mut wl = WlState::new();
+        let mut queue = conn.new_event_queue::<WlEventsStream>();
+        let mut wl_events = WlEventsStream::new();
 
         let (wl_seat, ext_data_control_manager, ext_data_control_device) =
-            get_objects(&conn, &mut queue, &mut wl)?;
+            get_objects(&conn, &mut queue, &mut wl_events)?;
 
         Ok(ConnectorOutput {
             conn,
-            wl,
+            wl_events,
             queue,
 
             wl_seat,
@@ -40,16 +40,15 @@ impl Connector {
 
 pub(crate) fn get_objects(
     conn: &Connection,
-    queue: &mut EventQueue<WlState>,
-    wl: &mut WlState,
+    queue: &mut EventQueue<WlEventsStream>,
+    wl_events: &mut WlEventsStream,
 ) -> Result<(WlSeat, ExtDataControlManagerV1, ExtDataControlDeviceV1), ConnectorError> {
-    let registry = conn.display().get_registry(&queue.handle(), ());
-    queue.roundtrip(wl)?;
+    let (registry, events) = wl_events.get_registry_and_registry_events_sync(conn, queue)?;
 
     let mut wl_seat: Option<WlSeat> = None;
     let mut ext_data_control_manager: Option<ExtDataControlManagerV1> = None;
 
-    while let Some(event) = wl.registry_events.pop_front() {
+    for event in events {
         match event {
             WlRegistryEvent::WlSeat { name, version } => {
                 wl_seat = Some(registry.bind(name, version, &queue.handle(), ()));

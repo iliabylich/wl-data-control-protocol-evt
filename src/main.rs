@@ -22,8 +22,8 @@ use offer_seq::OfferSeq;
 mod wl_event;
 use wl_event::{WlEvent, WlOfferEvent, WlSourceEvent};
 
-mod wl_state;
-use wl_state::WlState;
+mod wl_events_stream;
+use wl_events_stream::WlEventsStream;
 
 mod mime_types;
 use mime_types::MimeTypes;
@@ -33,6 +33,8 @@ use epoll::{Epoll, EpollError, EpollResult};
 
 mod connector;
 use connector::{Connector, ConnectorOutput};
+
+mod evented;
 
 struct State {
     wl_seat: WlSeat,
@@ -44,8 +46,8 @@ struct State {
     running: bool,
 
     _connection: Connection,
-    queue: EventQueue<WlState>,
-    wl: WlState,
+    queue: EventQueue<WlEventsStream>,
+    wl_events: WlEventsStream,
     readers: HashMap<i32, Reader>,
     writers: HashMap<i32, Writer>,
     mime_types: MimeTypes,
@@ -59,7 +61,7 @@ impl State {
     fn connect() -> Result<Self, Box<dyn std::error::Error>> {
         let ConnectorOutput {
             conn,
-            wl,
+            wl_events,
             queue,
             wl_seat,
             ext_data_control_manager,
@@ -75,7 +77,7 @@ impl State {
             epoll: Epoll::new(conn.as_fd())?,
             epoll_events: Vec::with_capacity(16),
 
-            wl,
+            wl_events,
             queue,
             _connection: conn,
             readers: HashMap::new(),
@@ -267,14 +269,7 @@ impl State {
     }
 
     fn handle_wl_socket(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let wl_read_guard = self
-            .queue
-            .prepare_read()
-            .expect("failed to create ReadEventsGuard");
-        wl_read_guard.read()?;
-        self.queue.dispatch_pending(&mut self.wl)?;
-
-        while let Some(event) = self.wl.events.pop_front() {
+        for event in self.wl_events.read_until_blocked(&mut self.queue)? {
             self.handle(event)?;
         }
 
@@ -342,7 +337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.handle_epoll_result(epoll_result)?;
 
         state.queue.flush()?;
-        state.queue.dispatch_pending(&mut state.wl)?;
+        state.queue.dispatch_pending(&mut state.wl_events)?;
     }
 
     state.cleanup();

@@ -7,32 +7,30 @@ use rustix::{
         timerfd_settime,
     },
 };
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use wl_data_control_protocol_evt::{ExtDataControlEvent, ExtDataControlStream};
 
 fn main() -> Result<()> {
     env_logger::init();
 
-    let timerfd = create_timer()?;
+    let timer = Timer::new()?;
     let mut stream = ExtDataControlStream::new()?;
     let mut tick = 0;
 
-    'outer: loop {
+    loop {
         let mut pollfds = [
-            PollFd::new(&timerfd, PollFlags::IN),
+            PollFd::new(&timer, PollFlags::IN),
             PollFd::new(&stream, PollFlags::IN),
         ];
         poll(&mut pollfds, None).context("poll() failed")?;
         let revents = [pollfds[0].revents(), pollfds[1].revents()];
 
-        //
+        // timer
         match REvents::new(revents[0]) {
             Some(REvents::Readable) => {
                 tick += 1;
                 log::trace!("tick {tick}");
-                let mut buf = [0_u8; 8];
-                let bytes_read = rustix::io::read(&timerfd, &mut buf)?;
-                assert_eq!(bytes_read, 8);
+                timer.read()?;
 
                 if tick != 0 && tick % 5 == 0 {
                     let text = format!("text{tick}");
@@ -40,11 +38,11 @@ fn main() -> Result<()> {
                     stream.offer_text(text)?;
                 }
             }
-            Some(REvents::Err) => bail!("timer returned err"),
+            Some(REvents::Err) => bail!("polling timer returned err"),
             None => {}
         }
 
-        //
+        // ExtDataControlStream
         match REvents::new(revents[1]) {
             Some(REvents::Readable) => {
                 for event in stream.drain()? {
@@ -53,39 +51,54 @@ fn main() -> Result<()> {
                     if let ExtDataControlEvent::Received(text) = event
                         && text == "EXIT"
                     {
-                        break 'outer;
+                        return Ok(());
                     }
                 }
             }
-            Some(REvents::Err) => bail!("crate returned err"),
+            Some(REvents::Err) => bail!("polling ExtDataControlEvent returned err"),
             None => {}
         }
     }
-
-    stream.cleanup();
-
-    Ok(())
 }
 
-fn create_timer() -> Result<OwnedFd> {
-    let timerfd = timerfd_create(TimerfdClockId::Monotonic, TimerfdFlags::NONBLOCK)
-        .context("timerfd_create() failed")?;
-    timerfd_settime(
-        &timerfd,
-        TimerfdTimerFlags::ABSTIME,
-        &Itimerspec {
-            it_interval: Timespec {
-                tv_sec: 1,
-                tv_nsec: 0,
+struct Timer {
+    timerfd: OwnedFd,
+}
+
+impl Timer {
+    fn new() -> Result<Self> {
+        let timerfd = timerfd_create(TimerfdClockId::Monotonic, TimerfdFlags::NONBLOCK)
+            .context("timerfd_create() failed")?;
+        timerfd_settime(
+            &timerfd,
+            TimerfdTimerFlags::ABSTIME,
+            &Itimerspec {
+                it_interval: Timespec {
+                    tv_sec: 1,
+                    tv_nsec: 0,
+                },
+                it_value: Timespec {
+                    tv_sec: 1,
+                    tv_nsec: 0,
+                },
             },
-            it_value: Timespec {
-                tv_sec: 1,
-                tv_nsec: 0,
-            },
-        },
-    )
-    .context("timerfd_settime() failed")?;
-    Ok(timerfd)
+        )
+        .context("timerfd_settime() failed")?;
+        Ok(Self { timerfd })
+    }
+
+    fn read(&self) -> Result<()> {
+        let mut buf = [0_u8; 8];
+        let bytes_read = rustix::io::read(&self.timerfd, &mut buf)?;
+        assert_eq!(bytes_read, 8);
+        Ok(())
+    }
+}
+
+impl AsFd for Timer {
+    fn as_fd(&self) -> std::os::unix::prelude::BorrowedFd<'_> {
+        self.timerfd.as_fd()
+    }
 }
 
 enum REvents {

@@ -48,17 +48,6 @@ impl ExtDataControlStream {
         })
     }
 
-    /// Performs a synchronous cleanup.
-    ///
-    /// Optional, do it if you consider yourself a good citizen.
-    pub fn cleanup(&mut self) {
-        for reader in self.readers.values() {
-            reader.destroy();
-        }
-        self.rw_stream.cleanup();
-        self.connection.cleanup_and_flush();
-    }
-
     fn remove_reader(&mut self, fd: i32) -> Result<(), EpollError> {
         let Some(reader) = self.readers.remove(&fd) else {
             return Ok(());
@@ -236,6 +225,16 @@ impl AsFd for ExtDataControlStream {
 impl AsRawFd for ExtDataControlStream {
     fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
         self.epoll.as_raw_fd()
+    }
+}
+
+impl Drop for ExtDataControlStream {
+    fn drop(&mut self) {
+        for reader in self.readers.values() {
+            reader.destroy();
+        }
+        self.rw_stream.cleanup();
+        self.connection.cleanup_and_flush();
     }
 }
 

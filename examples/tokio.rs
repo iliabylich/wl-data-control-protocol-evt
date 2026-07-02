@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
     let mut timer = tokio::time::interval(Duration::from_secs(1));
     let mut tick = 0;
 
-    'outer: loop {
+    loop {
         tokio::select! {
             _ = timer.tick() => {
                 tick += 1;
@@ -30,14 +30,12 @@ async fn main() -> Result<()> {
                     if let ExtDataControlEvent::Received(text) = event
                         && text == "EXIT"
                     {
-                        break 'outer;
+                        return Ok(());
                     }
                 }
             }
         }
     }
-
-    Ok(())
 }
 
 struct AsyncExtDataControlStream {
@@ -65,11 +63,5 @@ impl AsyncExtDataControlStream {
         let events = self.inner.drain()?;
         guard.clear_ready();
         Ok(events)
-    }
-}
-
-impl Drop for AsyncExtDataControlStream {
-    fn drop(&mut self) {
-        self.inner.cleanup();
     }
 }

@@ -1,8 +1,11 @@
 [package]
 name = "wl-data-control-protocol-evt"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Implementation of ext-data-control Wayland protocol, pollable and event based"
+license = "MIT"
+repository = "https://github.com/iliabylich/mini-sansio-dbus"
+authors = ["Ilya Bylich <ibylich@gmail.com>"]
 
 [dependencies]
 crossbeam-queue = "0.3"

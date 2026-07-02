@@ -182,34 +182,46 @@ impl ExtDataControlStream {
         Ok(())
     }
 
-    /// Reads/writes events until it gets `WouldBlock` error, assuming that there's something to read.
-    ///
-    /// This method should be called if you know that Wayland socket is readable
-    /// (i.e. by calling `select`/`poll`/`epoll` on a file descriptor of `ExtDataControlStream` object)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any of underlying components errored.
-    pub fn read(&mut self) -> Result<Vec<ExtDataControlEvent>, ExtDataControlReadError> {
+    fn epoll_wait(
+        &mut self,
+        timeout: Option<&Timespec>,
+    ) -> Result<Option<EpollResult>, ExtDataControlReadError> {
         let epoll_result = self.epoll.wait(
             &mut self.epoll_events,
-            Some(&Timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            }),
+            timeout,
             self.connection.as_fd(),
             &self.readers,
             &self.writers,
         )?;
         self.epoll_events.clear();
+        Ok(epoll_result)
+    }
 
+    const ZERO_TIMEOUT: Option<&Timespec> = Some(&Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    });
+
+    /// Drains all **immediately** available events from underlying resources and returns them,
+    /// assuming that there's something to read.
+    ///
+    /// This method should be called if you know that the stream is readable
+    /// (i.e. by calling `select`/`poll`/`epoll` first on a file descriptor of `ExtDataControlStream` object)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of underlying components errored.
+    pub fn drain(&mut self) -> Result<Vec<ExtDataControlEvent>, ExtDataControlReadError> {
         let mut events = vec![];
-        self.process_epoll_result(epoll_result, &mut events)?;
 
-        self.connection.queue.flush()?;
-        self.connection
-            .queue
-            .dispatch_pending(&mut WlEventsStream)?;
+        while let Some(epoll_result) = self.epoll_wait(Self::ZERO_TIMEOUT)? {
+            self.process_epoll_result(epoll_result, &mut events)?;
+
+            self.connection.queue.flush()?;
+            self.connection
+                .queue
+                .dispatch_pending(&mut WlEventsStream)?;
+        }
 
         Ok(events)
     }
@@ -227,7 +239,7 @@ impl AsRawFd for ExtDataControlStream {
     }
 }
 
-/// An event. A collection of events is returned from `ExtDataControlStream::read()`.
+/// An event. A collection of events is returned from `ExtDataControlStream::drain()`.
 #[derive(Debug)]
 pub enum ExtDataControlEvent {
     /// New text is received (i.e. someone copied text to clipboard)

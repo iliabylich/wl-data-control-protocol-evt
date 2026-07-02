@@ -19,7 +19,7 @@ loop {
     poll(fd, IN)?;
 
     // read
-    let events = stream.read();
+    let events = stream.drain();
     for event in events {
         if let ExtDataControlEvent::Received(text) = event {
             println!("copied {text}")

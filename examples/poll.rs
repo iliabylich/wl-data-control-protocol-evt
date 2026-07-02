@@ -15,7 +15,7 @@ fn main() -> Result<()> {
 
     let timerfd = create_timer()?;
     let mut stream = ExtDataControlStream::new()?;
-    let mut tick = 5;
+    let mut tick = 0;
 
     'outer: loop {
         let mut pollfds = [
@@ -28,14 +28,16 @@ fn main() -> Result<()> {
         //
         match REvents::new(revents[0]) {
             Some(REvents::Readable) => {
+                tick += 1;
                 log::trace!("tick {tick}");
                 let mut buf = [0_u8; 8];
                 let bytes_read = rustix::io::read(&timerfd, &mut buf)?;
                 assert_eq!(bytes_read, 8);
 
-                tick += 1;
-                if tick % 10 == 0 {
-                    stream.offer_text(format!("text{tick}"))?;
+                if tick != 0 && tick % 5 == 0 {
+                    let text = format!("text{tick}");
+                    log::info!("pasting {text:?}");
+                    stream.offer_text(text)?;
                 }
             }
             Some(REvents::Err) => bail!("timer returned err"),
@@ -45,9 +47,8 @@ fn main() -> Result<()> {
         //
         match REvents::new(revents[1]) {
             Some(REvents::Readable) => {
-                log::trace!("wl is readable");
-                for event in stream.read()? {
-                    println!("{event:?}");
+                for event in stream.drain()? {
+                    log::info!("{event:?}");
 
                     if let ExtDataControlEvent::Received(text) = event
                         && text == "EXIT"

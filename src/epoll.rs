@@ -70,7 +70,7 @@ impl Epoll {
         wl_fd: BorrowedFd<'_>,
         readers: &HashMap<i32, R>,
         writers: &HashMap<i32, W>,
-    ) -> Result<EpollResult, EpollError> {
+    ) -> Result<Option<EpollResult>, EpollError> {
         epoll::wait(&self.epollfd, spare_capacity(epoll_events), timeout)?;
         EpollResult::new(epoll_events, wl_fd, readers, writers)
     }
@@ -108,7 +108,7 @@ impl EpollResult {
         wl_fd: BorrowedFd<'_>,
         readers: &HashMap<i32, R>,
         writers: &HashMap<i32, W>,
-    ) -> Result<Self, EpollError> {
+    ) -> Result<Option<Self>, EpollError> {
         let mut wl_is_readable = false;
         let mut readers_fd_set = FdSet::default();
         let mut writers_fd_set = FdSet::default();
@@ -140,10 +140,19 @@ impl EpollResult {
             }
         }
 
-        Ok(Self {
-            wl_is_readable,
-            readers: readers_fd_set,
-            writers: writers_fd_set,
-        })
+        if !wl_is_readable
+            && readers_fd_set.ready.is_empty()
+            && readers_fd_set.dead.is_empty()
+            && writers_fd_set.ready.is_empty()
+            && writers_fd_set.dead.is_empty()
+        {
+            Ok(None)
+        } else {
+            Ok(Some(Self {
+                wl_is_readable,
+                readers: readers_fd_set,
+                writers: writers_fd_set,
+            }))
+        }
     }
 }
